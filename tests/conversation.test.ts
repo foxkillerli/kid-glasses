@@ -8,7 +8,7 @@ const mine = (seq: number, text: string, cid?: string) => ({ seq, from: 'glasses
 
 describe('Conversation (lens view)', () => {
   it('own turns take one lens line; Kid replies wrap with the lens rules', () => {
-    const c = new Conversation()
+    const c = new Conversation({ progressiveReveal: false })
     c.upsert([mine(1, '今天下午几点放学，要不要我来接你，顺便去超市买点东西回家'), kid(2, '三点半')], 'live')
     const lines = c.view().body.split('\n')
     expect(lines[0].startsWith('我：')).toBe(true)
@@ -17,7 +17,7 @@ describe('Conversation (lens view)', () => {
   })
 
   it('a long Kid reply is paginated with LENS_TEXT and the view jumps to its first page', () => {
-    const c = new Conversation()
+    const c = new Conversation({ progressiveReveal: false })
     for (let i = 1; i <= 12; i++) c.upsert([mine(i, `问题${i}`)], 'live')
     const long = '这是一段很长的回复。'.repeat(40)
     c.upsert([kid(13, long)], 'live')
@@ -127,10 +127,17 @@ describe('Conversation paging: fill-triggered, not timed', () => {
     expect(c.view().page).toBe(c.view().pages)
   })
 
+  it('the shipped default follows PROGRESSIVE_KID_REVEAL, which is now on', () => {
+    expect(PROGRESSIVE_KID_REVEAL).toBe(true)
+    const c = new Conversation({ now: () => 0 })
+    c.upsert([kid(1, zi(50))], 'live')
+    expect(c.revealing).toBe(true)
+    expect(c.view().body).toBe('Kid：')
+  })
+
   it('(e) with the flag off, an all-at-once Kid reply shows in full from its page 1 and is never auto-walked', () => {
-    expect(PROGRESSIVE_KID_REVEAL).toBe(false)
     let now = 0
-    const c = new Conversation({ now: () => now })
+    const c = new Conversation({ progressiveReveal: false, now: () => now })
     c.upsert([mine(1, '讲个故事')], 'live')
     const story = zi(300)
     c.upsert([kid(2, story)], 'live')

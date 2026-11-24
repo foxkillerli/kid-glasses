@@ -170,8 +170,8 @@ The plugin opens on the **Kid** page.
 
 - Growing content (the live transcript `你说：…` in the body while you talk, and each new message) keeps the view on the page that holds the newest text, so it advances the moment the current page fills.
 - After you swipe back to an older page, re-layout and redraws leave you there. New content (a new transcript chunk or a new message) brings you back to the newest page, and fill-triggered advance resumes. The relay echoing a turn already shown as `我（待发）` does not count as new.
-- A Kid reply that arrives all at once is shown in full from its first page. Swipe to browse.
-- Progressive reveal exists but is **off**: `PROGRESSIVE_KID_REVEAL` in `src/lib/kid-reveal.ts`, at the `READING_SPEED` in the same file (6 CJK / 15 Latin chars per second). When on, a live Kid reply types out at that speed and flips as each page fills; a tap or swipe shows the rest at once. Replayed and history replies are never revealed.
+- A new Kid reply is revealed progressively at `READING_SPEED` (6 CJK / 15 Latin chars per second), and the page flips the moment it fills, then writing continues. This is on: `PROGRESSIVE_KID_REVEAL = true` in `src/lib/kid-reveal.ts`, a one-line switch. Set it to `false` and a reply shows in full from its first page.
+- A tap or swipe during the reveal shows the rest at once; a swipe also moves one page. New content ends the reveal and goes to the newest page. Replayed (catch-up) and history replies are shown in full, without a reveal.
 
 **Connection** (`src/lib/relay-client.ts`):
 

@@ -1,6 +1,6 @@
 import { isWide } from './lens-text'
 
-export const PROGRESSIVE_KID_REVEAL = false
+export const PROGRESSIVE_KID_REVEAL = true
 
 export const READING_SPEED = { zhCharsPerSecond: 6, enCharsPerSecond: 15 } as const
 
