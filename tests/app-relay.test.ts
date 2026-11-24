@@ -90,8 +90,18 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     send(audio({ audioPcm: [9, 9], source: 'phone' }))
     send(audio({ audioPcm: [8, 8], audioSource: 'phone' }))
     send(audio({ audioPcm: [3, 0] }))
+    ws.frame({ t: 'asr.partial', text: '今天几点' })
+    await settle()
+    expect(body()).toContain('你说：今天几点')
     send({ sysEvent: { eventType: 10 } })
     await settle()
+    ws.frame({ t: 'asr.final', text: '今天几点放学' })
+    await settle()
+    expect(body()).toContain('你说：今天几点放学')
+    ws.frame({ t: 'msg', seq: 3, from: 'glasses', text: '今天几点放学', at: 3, session: 's', cid: start?.cid })
+    await settle()
+    expect(body()).not.toContain('你说：')
+    expect(body()).toContain('我：今天几点放学')
     const binary = ws.sent.filter(d => typeof d !== 'string') as Uint8Array[]
     expect(binary.map(b => Array.from(b))).toEqual([
       [1, 0, 2, 0],

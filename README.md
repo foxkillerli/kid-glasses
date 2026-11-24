@@ -166,6 +166,13 @@ The plugin opens on the **Kid** page.
 - It streams to the relay (Deepgram); the transcript is posted to Slack as `〔眼镜〕…` and Kid's webhook is called.
 - Kid's replies appear on the lens, paginated with `LENS_TEXT`.
 
+**Paging** (`src/lib/conversation.ts`). Pages flip when they fill, never on a timer.
+
+- Growing content (the live transcript `你说：…` in the body while you talk, and each new message) keeps the view on the page that holds the newest text, so it advances the moment the current page fills.
+- After you swipe back to an older page, re-layout and redraws leave you there. New content (a new transcript chunk or a new message) brings you back to the newest page, and fill-triggered advance resumes. The relay echoing a turn already shown as `我（待发）` does not count as new.
+- A Kid reply that arrives all at once is shown in full from its first page. Swipe to browse.
+- Progressive reveal exists but is **off**: `PROGRESSIVE_KID_REVEAL` in `src/lib/kid-reveal.ts`, at the `READING_SPEED` in the same file (6 CJK / 15 Latin chars per second). When on, a live Kid reply types out at that speed and flips as each page fills; a tap or swipe shows the rest at once. Replayed and history replies are never revealed.
+
 **Connection** (`src/lib/relay-client.ts`):
 
 - First frame `auth`, then `hello {lastSeq}` and one history page.

@@ -218,6 +218,7 @@ export class App {
   private readonly relay: RelayClient
   private readonly pairing: PairingClient
   private readonly conv = new Conversation()
+  private liveCid: string | null = null
   private relayDetail = ''
   private flash: { text: string; until: number } | null = null
   private readonly voice: VoiceState = { active: false, mode: 'tap', cid: null, startedAt: 0, frames: 0, dropped: 0, partial: '', lastLongEndAt: 0 }
@@ -291,6 +292,7 @@ export class App {
       events: {
         state: (st, detail) => this.onRelayState(st, detail),
         items: (items, kind) => {
+          if (this.liveCid && items.some(i => i.cid === this.liveCid)) this.clearLive()
           const kid = this.conv.upsert(items, kind)
           if (kid && this.screen.kind === 'menu') this.screen = { kind: 'kid' }
           if (kid) this.note(`kid reply seq=${kid.seq} len=${kid.text.length}`)
@@ -304,11 +306,16 @@ export class App {
         error: (code, _message, cid) => {
           this.note(`relay error ${code}${cid ? ' cid' : ''}`)
           if (cid && cid === this.voice.cid && this.voice.active) void this.stopVoice('relay-error', false)
+          if (cid && cid === this.liveCid) this.clearLive()
           this.showFlash(ERROR_TEXT[code] ?? `出错了：${code}`)
         },
         asr: (kind, text) => {
           this.voice.partial = text
           if (kind === 'final' && !text) this.voice.partial = ''
+          if (this.liveCid) {
+            if (kind === 'final' && !text) this.clearLive()
+            else this.conv.setLive(text)
+          }
           this.kidChanged(false)
         },
         webhook: (result, status) => {
@@ -554,7 +561,7 @@ export class App {
 
   private kidHint(): string {
     const now = Date.now()
-    if (this.voice.active) return oneLine(this.voice.partial ? `你说：${this.voice.partial}` : '正在听… 松开或单击发送')
+    if (this.voice.active) return '● 正在听… 松开或单击发送'
     if (this.flash && this.flash.until > now) return oneLine(`!! ${this.flash.text}`)
     if (this.relay.state === 'need-pair') return '单击：重新获取  双击：菜单'
     const v = this.conv.view()
@@ -742,6 +749,12 @@ export class App {
     if (this.screen.kind === 'mic' && m.recording) this.refresh()
     if (this.voice.active && Date.now() - this.voice.startedAt > VOICE_MAX_MS) void this.stopVoice('max-length', true)
     if (this.voice.active && this.screen.kind === 'kid') this.refresh()
+    if (this.conv.revealing && this.conv.tick() && this.screen.kind === 'kid') this.refresh()
+  }
+
+  private clearLive(): void {
+    this.liveCid = null
+    this.conv.setLive(null)
   }
 
   private onEvent(ev: EvenHubEvent): void {
@@ -899,6 +912,10 @@ export class App {
       if (g === 'click' && (ph === 'expired' || ph === 'error')) void this.pairing.restart()
       return
     }
+    if (this.conv.revealing && (g === 'click' || g === 'up' || g === 'down')) {
+      this.conv.skipReveal()
+      if (g === 'click') return
+    }
     if (g === 'up') this.conv.prev()
     else if (g === 'down') this.conv.next()
     else if (g === 'longStart') {
@@ -926,6 +943,9 @@ export class App {
       return
     }
     Object.assign(v, { active: true, mode, cid, startedAt: Date.now(), frames: 0, dropped: 0, partial: '' })
+    this.conv.skipReveal()
+    this.conv.setLive(null)
+    this.liveCid = cid
     this.refresh()
     let r: unknown
     try {
@@ -945,7 +965,10 @@ export class App {
     if (!v.active) return
     v.active = false
     if (userEnded) this.relay.audioStop()
-    else this.relay.audioCancel()
+    else {
+      this.relay.audioCancel()
+      this.clearLive()
+    }
     let r: unknown
     try {
       r = await closeGlassesMic(this.bridge)
@@ -953,7 +976,10 @@ export class App {
       r = `throw ${String(err).slice(0, 40)}`
     }
     this.note(`voice stop ${reason} frames=${v.frames} dropped=${v.dropped} ${((Date.now() - v.startedAt) / 1000).toFixed(1)}s audioControl -> ${String(r)}`)
-    if (userEnded && v.frames === 0) this.showFlash('没收到眼镜的声音，这句没发出去')
+    if (userEnded && v.frames === 0) {
+      this.clearLive()
+      this.showFlash('没收到眼镜的声音，这句没发出去')
+    }
     this.refresh()
   }
 
