@@ -2,11 +2,13 @@ import { CLOSE_STREAM, TranscriptAssembler, parseDeepgramMessage } from './deepg
 import { checkDeviceToken, isAuthedAttachment, type SocketAttachment } from './device-auth'
 import type { FastLane } from './fast-lane'
 import type { KidWebhook } from './kid-webhook'
+import { errorName } from './log'
+import { PAIR_CODE_RE, PAIR_ID_RE, type Pairing } from './pairing'
 import { HistoryStore, PAGE_MAX, type HistoryItem, type KvStorage } from './history'
-import { parseClientMessage, type ServerMessage } from './protocol'
+import { parseClientMessage, type ServerMessage, type WireItem } from './protocol'
 import { MAX_OUTGOING_CHARS, clip, cleanText, fromSlack, isFromGlasses, toSlack } from './sanitize'
 import type { KidMessage } from './slack-events'
-import type { PostResult } from './slack-client'
+import { ChannelNotAllowedError, SlackApiError, SlackConfigError, type PostResult } from './slack-client'
 
 export interface DeviceSocket {
   send(data: string): void
@@ -29,6 +31,7 @@ export interface HubDeps {
   asr: { connect(): Promise<AsrSocket> } | null
   fastLane: FastLane
   kidWebhook?: KidWebhook | null
+  pairing?: Pairing | null
   now: () => number
   log?: (message: string) => void
 }
@@ -47,6 +50,9 @@ export const DELIVERED_PREFIX = 'delivered:'
 export const EDITED_MARK = '（已修改）'
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SEEN_CAP = 200
+export const CIDS_KEY = 'meta:cids'
+export const CID_CAP = 300
+export const CID_TTL_MS = 24 * 60 * 60 * 1000
 export const PENDING_AUDIO_CAP = 100
 export const CLOSE_UNAUTHORIZED = 4401
 export const CLOSE_NOT_CONFIGURED = 4503
@@ -57,7 +63,18 @@ interface AsrTurn {
   pending: Array<ArrayBuffer | ArrayBufferView>
   stopRequested: boolean
   finished: boolean
+  cid: string | undefined
   resolve: (text: string | null) => void
+}
+
+interface CidEntry {
+  cid: string
+  seq: number
+  at: number
+}
+
+export interface DeviceAttachment extends SocketAttachment {
+  deviceId?: string
 }
 
 export function isAuthed(ws: DeviceSocket): boolean {
@@ -94,7 +111,7 @@ export class HubCore {
     try {
       ws.send(JSON.stringify(msg))
     } catch (err) {
-      this.log(`send failed ${String(err)}`)
+      this.log(`send failed ${errorName(err)}`)
     }
   }
 
@@ -102,8 +119,13 @@ export class HubCore {
     for (const ws of this.deps.sockets()) if (isAuthed(ws)) this.send(ws, msg)
   }
 
-  private toWire(i: HistoryItem) {
-    return { seq: i.seq, from: i.from, text: i.text, at: i.at, session: i.session ?? null, ...(i.edited ? { edited: true } : {}) }
+  private toWire(i: HistoryItem): WireItem {
+    return { seq: i.seq, from: i.from, text: i.text, at: i.at, session: i.session ?? null, ...(i.edited ? { edited: true } : {}), ...(i.cid ? { cid: i.cid } : {}) }
+  }
+
+  private async liveCids(): Promise<CidEntry[]> {
+    const now = this.deps.now()
+    return ((await this.deps.storage.get<CidEntry[]>(CIDS_KEY)) ?? []).filter(c => now - c.at < CID_TTL_MS)
   }
 
   private async sessionForThread(threadTs: string | null): Promise<string | null> {
@@ -167,10 +189,10 @@ export class HubCore {
         this.send(ws, { t: 'pong' })
         return
       case 'say':
-        await this.sayFromGlasses(m.text)
+        await this.sayFromGlasses(m.text, m.cid)
         return
       case 'audio.start':
-        await this.startAsr(ws)
+        await this.startAsr(ws, m.cid)
         return
       case 'audio.stop':
         this.stopAsr('device')
@@ -189,11 +211,18 @@ export class HubCore {
   private async authenticate(ws: DeviceSocket, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
     const parsed = typeof data === 'string' ? parseClientMessage(data) : null
     if (!parsed?.ok || parsed.msg.t !== 'auth') return this.rejectUnauthed(ws, CLOSE_UNAUTHORIZED, 'unauthorized')
-    const verdict = checkDeviceToken(parsed.msg.token, this.deps.deviceToken)
-    if (verdict === 'not-configured') return this.rejectUnauthed(ws, CLOSE_NOT_CONFIGURED, 'device-token-not-configured')
-    if (verdict !== 'ok') return this.rejectUnauthed(ws, CLOSE_UNAUTHORIZED, 'unauthorized')
-    const attachment: SocketAttachment = { authed: true, connectedAt: this.deps.now() }
+    const token = parsed.msg.token
+    const verdict = checkDeviceToken(token, this.deps.deviceToken)
+    let deviceId: string | null = null
+    if (verdict !== 'ok' && this.deps.pairing) deviceId = await this.deps.pairing.verify(token)
+    if (verdict !== 'ok' && !deviceId) {
+      if (verdict === 'not-configured') return this.rejectUnauthed(ws, CLOSE_NOT_CONFIGURED, 'device-token-not-configured')
+      this.log('device auth rejected')
+      return this.rejectUnauthed(ws, CLOSE_UNAUTHORIZED, 'unauthorized')
+    }
+    const attachment: DeviceAttachment = { authed: true, connectedAt: this.deps.now(), ...(deviceId ? { deviceId } : {}) }
     ws.serializeAttachment(attachment)
+    this.log(`device auth ok kind=${deviceId ? `paired id=${deviceId}` : 'shared'}`)
     this.send(ws, { t: 'auth.ok' })
   }
 
@@ -207,14 +236,22 @@ export class HubCore {
     }
   }
 
-  sayFromGlasses(raw: string): Promise<HistoryItem | null> {
-    return this.enqueue(() => this.postNow(raw))
+  sayFromGlasses(raw: string, cid?: string): Promise<HistoryItem | null> {
+    return this.enqueue(() => this.postNow(raw, cid))
   }
 
-  private async postNow(raw: string): Promise<HistoryItem | null> {
+  private async postNow(raw: string, cid?: string): Promise<HistoryItem | null> {
+    const cids = cid ? await this.liveCids() : []
+    const known = cid ? cids.find(c => c.cid === cid) : undefined
+    if (cid && known) {
+      const prior = await this.history.get(known.seq)
+      this.log(`say duplicate cid seq=${known.seq}`)
+      this.broadcast({ t: 'posted', seq: known.seq, text: prior?.text ?? '', cid, dup: true })
+      return prior ?? null
+    }
     const slackText = toSlack(raw)
     if (!slackText) {
-      this.broadcast({ t: 'error', code: 'empty-text', message: 'nothing to send' })
+      this.broadcast({ t: 'error', code: 'empty-text', message: 'nothing to send', ...(cid ? { cid } : {}) })
       return null
     }
     const session = await this.currentSession()
@@ -223,23 +260,29 @@ export class HubCore {
       posted = await this.deps.slack.postToKid(slackText, session.threadTs)
     } catch (err) {
       const e = err as Error
-      this.log(`slack post failed ${e.name}`)
-      this.broadcast({ t: 'error', code: e.name || 'slack-error', message: e.message })
+      this.log(`slack post failed ${errorName(e)}`)
+      const known = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError || e instanceof SlackApiError
+      this.broadcast({ t: 'error', code: known ? e.name : 'slack-unreachable', message: known ? e.message : 'could not reach Slack', ...(cid ? { cid } : {}) })
       return null
     }
     const next: Session = { ...session, threadTs: session.threadTs ?? posted.ts, lastAt: this.deps.now() }
     const sessionWrites: Record<string, unknown> = { [SESSION_KEY]: next }
     if (!session.threadTs && next.threadTs) sessionWrites[THREAD_PREFIX + next.threadTs] = next.id
     await this.deps.storage.putAll(sessionWrites)
-    const item = await this.history.append({
-      from: 'glasses',
-      text: cleanText(raw),
-      slackTs: posted.ts,
-      threadTs: next.threadTs,
-      session: next.id,
-      at: this.deps.now(),
-    })
-    this.broadcast({ t: 'posted', seq: item.seq, text: item.text })
+    const item = await this.history.append(
+      {
+        from: 'glasses',
+        text: cleanText(raw),
+        slackTs: posted.ts,
+        threadTs: next.threadTs,
+        session: next.id,
+        ...(cid ? { cid } : {}),
+        at: this.deps.now(),
+      },
+      (seq: number): Record<string, unknown> => (cid ? { [CIDS_KEY]: [...cids, { cid, seq, at: this.deps.now() }].slice(-CID_CAP) } : {}),
+    )
+    this.log(`say posted seq=${item.seq} len=${item.text.length}${cid ? ' cid' : ''}`)
+    this.broadcast({ t: 'posted', seq: item.seq, text: item.text, ...(cid ? { cid } : {}) })
     await this.notifyKid(next, posted, item)
     if (this.deps.fastLane.enabled) {
       const answer = await this.deps.fastLane.answer(item.text)
@@ -324,11 +367,60 @@ export class HubCore {
     return item
   }
 
+  async pairRequest(path: string, body: Record<string, unknown> | null, client: string): Promise<{ status: number; body: unknown } | null> {
+    const pairing = this.deps.pairing
+    if (!pairing) return null
+    if (path === '/pair/start') {
+      const r = await pairing.start(client)
+      this.log(`pair start ${r.ok ? 'ok' : r.error}`)
+      return r.ok ? { status: 200, body: { pairId: r.pairId, code: r.code, expiresAt: r.expiresAt } } : { status: 429, body: { error: r.error } }
+    }
+    if (path === '/pair/poll') {
+      const pairId = typeof body?.pairId === 'string' && PAIR_ID_RE.test(body.pairId) ? body.pairId : null
+      if (!pairId) return { status: 400, body: { error: 'bad-request' } }
+      const r = await pairing.poll(pairId, client)
+      if (r.status === 'paired') this.log(`pair paired id=${r.deviceId}`)
+      return { status: r.status === 'rate-limited' ? 429 : 200, body: r }
+    }
+    if (path === '/pair-confirm' || path === '/pair-revoke') {
+      const user = typeof body?.user === 'string' ? body.user : ''
+      const fox = await this.deps.slack.selfUserId()
+      if (!fox || user !== fox) {
+        this.log(`pair command rejected reason=${fox ? 'not-fox' : 'self-unknown'}`)
+        return { status: 200, body: { ok: false } }
+      }
+      if (path === '/pair-revoke') {
+        const n = await pairing.revokeAll()
+        let closed = 0
+        for (const ws of this.deps.sockets()) {
+          try {
+            const a = ws.deserializeAttachment() as DeviceAttachment | null
+            if (a?.deviceId) {
+              ws.serializeAttachment({ ...a, authed: false })
+              ws.close(CLOSE_UNAUTHORIZED, 'revoked')
+              closed++
+            }
+          } catch {
+            continue
+          }
+        }
+        this.log(`pair revoke devices=${n} sockets=${closed}`)
+        return { status: 200, body: { ok: true, revoked: n } }
+      }
+      const code = typeof body?.code === 'string' && PAIR_CODE_RE.test(body.code) ? body.code : null
+      if (!code) return { status: 200, body: { ok: false } }
+      const r = await pairing.confirm(code)
+      this.log(`pair confirm ${r.ok ? 'ok' : `rejected reason=${r.reason}`}`)
+      return { status: 200, body: r }
+    }
+    return null
+  }
+
   get recording(): boolean {
     return !!this.turn && !this.turn.finished && !this.turn.stopRequested
   }
 
-  async startAsr(ws: DeviceSocket): Promise<void> {
+  async startAsr(ws: DeviceSocket, cid?: string): Promise<void> {
     if (!this.deps.asr) {
       this.send(ws, { t: 'error', code: 'asr-not-configured', message: 'DEEPGRAM_API_KEY is not set' })
       return
@@ -336,9 +428,9 @@ export class HubCore {
     if (this.recording) return
     let resolve: (text: string | null) => void = () => {}
     const result = new Promise<string | null>(r => (resolve = r))
-    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false, resolve }
+    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false, cid, resolve }
     this.turn = turn
-    this.turnChain = this.turnChain.then(() => result).then(text => (text ? this.sayFromGlasses(text) : null)).catch(() => null)
+    this.turnChain = this.turnChain.then(() => result).then(text => (text ? this.sayFromGlasses(text, cid) : null)).catch(() => null)
     let socket: AsrSocket
     try {
       socket = await this.deps.asr.connect()
@@ -346,7 +438,9 @@ export class HubCore {
       turn.finished = true
       if (this.turn === turn) this.turn = null
       turn.resolve(null)
-      this.broadcast({ t: 'error', code: 'asr-connect-failed', message: String(err) })
+      const message = err instanceof Error && /^deepgram upgrade failed: http \d{3}$/.test(err.message) ? err.message : 'could not reach the transcription service'
+      this.log(`asr connect failed ${errorName(err)}`)
+      this.broadcast({ t: 'error', code: 'asr-connect-failed', message, ...(cid ? { cid } : {}) })
       return
     }
     turn.socket = socket
@@ -399,11 +493,14 @@ export class HubCore {
     if (this.turn === t) this.turn = null
     const text = t.assembler.finalText()
     if (!completed) {
-      this.broadcast({ t: 'error', code: 'asr-interrupted', message: 'transcription ended early; nothing was sent' })
+      this.log('asr interrupted')
+      this.broadcast({ t: 'error', code: 'asr-interrupted', message: 'transcription ended early; nothing was sent', ...(t.cid ? { cid: t.cid } : {}) })
       t.resolve(null)
       return
     }
+    this.log(`asr final len=${text.length}`)
     this.broadcast({ t: 'asr.final', text })
+    if (!text) this.broadcast({ t: 'error', code: 'asr-empty', message: 'no speech recognised; nothing was sent', ...(t.cid ? { cid: t.cid } : {}) })
     t.resolve(text || null)
   }
 }

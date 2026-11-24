@@ -73,7 +73,7 @@ describe('HubCore', () => {
       slack: {
         selfUserId: async () => null,
         postToKid: async () => {
-          throw new ChannelNotAllowedError('C123')
+          throw new ChannelNotAllowedError()
         },
       },
     })
@@ -575,7 +575,7 @@ describe('HubCore Kid webhook', () => {
       slack: {
         selfUserId: async () => 'UFOX0001',
         postToKid: async () => {
-          if (opts.failPost) throw new ChannelNotAllowedError('C1')
+          if (opts.failPost) throw new ChannelNotAllowedError()
           return { ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }
         },
       },

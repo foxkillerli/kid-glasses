@@ -22,6 +22,8 @@ export interface KidAllowlist {
 export type SlackRoute =
   | { kind: 'challenge'; challenge: string }
   | { kind: 'kid-message'; message: KidMessage }
+  | { kind: 'pair-confirm'; code: string; user: string; eventId: string }
+  | { kind: 'pair-revoke'; user: string; eventId: string }
   | { kind: 'ignore'; reason: string }
 
 const PLAIN_SUBTYPES = new Set([undefined, 'bot_message', 'thread_broadcast', 'me_message'])
@@ -61,6 +63,24 @@ export function effectiveText(m: Obj): string {
   return str(m.text) ?? attachmentText(m)
 }
 
+export const PAIR_CONFIRM_RE = /^\s*配对\s*(\d{6})\s*$/
+export const PAIR_REVOKE_RE = /^\s*撤销配对\s*$/
+
+function pairCommand(b: Obj, e: Obj): SlackRoute | null {
+  const text = typeof e.text === 'string' ? e.text : ''
+  const confirm = PAIR_CONFIRM_RE.exec(text)
+  const revoke = PAIR_REVOKE_RE.test(text)
+  if (!confirm && !revoke) return null
+  const appMarked = e.subtype !== undefined || e.bot_id !== undefined || e.app_id !== undefined || e.bot_profile !== undefined || !!e.hidden
+  if (appMarked) return { kind: 'ignore', reason: 'pair-app-marked' }
+  const user = str(e.user)
+  if (!user) return { kind: 'ignore', reason: 'pair-no-user' }
+  const installers = installerUserIds(b)
+  if (installers.size > 0 && !installers.has(user)) return { kind: 'ignore', reason: 'pair-not-installer' }
+  const eventId = str(b.event_id) ?? `pair:${str(e.ts) ?? ''}`
+  return confirm ? { kind: 'pair-confirm', code: confirm[1], user, eventId } : { kind: 'pair-revoke', user, eventId }
+}
+
 export function startsWithGlassesPrefix(text: string): boolean {
   return text.trimStart().startsWith(GLASSES_PREFIX)
 }
@@ -75,6 +95,9 @@ export function routeSlackEvent(body: unknown, kidChannelId: string | undefined,
   if (e.type !== 'message') return { kind: 'ignore', reason: `event:${String(e.type)}` }
   if (e.channel !== kidChannelId) return { kind: 'ignore', reason: 'other-channel' }
   if (e.channel_type !== undefined && e.channel_type !== 'im') return { kind: 'ignore', reason: 'not-im' }
+
+  const pair = pairCommand(b, e)
+  if (pair) return pair
 
   const subtype = e.subtype as string | undefined
   let m: Obj

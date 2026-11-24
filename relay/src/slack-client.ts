@@ -1,6 +1,6 @@
 export class ChannelNotAllowedError extends Error {
-  constructor(channel: string) {
-    super(`refusing to post to channel ${channel}: only the configured Kid DM channel is allowed`)
+  constructor() {
+    super('refusing to post: only the configured Kid DM channel is allowed')
     this.name = 'ChannelNotAllowedError'
   }
 }
@@ -42,7 +42,7 @@ export class KidDmClient {
     if (!this.kidChannelId || !DM_CHANNEL.test(this.kidChannelId)) {
       throw new SlackConfigError('KID_DM_CHANNEL_ID is missing or is not a DM channel id (D…)')
     }
-    if (channel !== this.kidChannelId) throw new ChannelNotAllowedError(channel)
+    if (channel !== this.kidChannelId) throw new ChannelNotAllowedError()
   }
 
   async postMessage(channel: string, text: string, threadTs: string | null): Promise<PostResult> {
@@ -60,7 +60,7 @@ export class KidDmClient {
     if (res.status === 429) throw new SlackApiError('ratelimited', Number(res.headers.get('Retry-After') ?? '1'))
     const data = (await res.json()) as { ok?: boolean; error?: string; ts?: string; channel?: string }
     if (!data.ok || !data.ts) throw new SlackApiError(data.error ?? `http_${res.status}`)
-    if (data.channel && data.channel !== this.kidChannelId) throw new ChannelNotAllowedError(data.channel)
+    if (data.channel && data.channel !== this.kidChannelId) throw new ChannelNotAllowedError()
     return { ts: data.ts, channel: data.channel ?? channel }
   }
 

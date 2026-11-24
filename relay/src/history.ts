@@ -16,6 +16,7 @@ export interface HistoryItem {
   threadTs: string | null
   session?: string | null
   edited?: boolean
+  cid?: string
   at: number
 }
 
@@ -34,12 +35,20 @@ export class HistoryStore {
     private readonly cap = HISTORY_CAP,
   ) {}
 
-  async append(item: Omit<HistoryItem, 'seq'>, alsoWrite: Record<string, unknown> = {}): Promise<HistoryItem> {
+  async append(
+    item: Omit<HistoryItem, 'seq'>,
+    alsoWrite: Record<string, unknown> | ((seq: number) => Record<string, unknown>) = {},
+  ): Promise<HistoryItem> {
     const seq = ((await this.storage.get<number>(SEQ_KEY)) ?? 0) + 1
     const full = { ...item, seq }
-    await this.storage.putAll({ ...alsoWrite, [key(seq)]: full, [SEQ_KEY]: seq })
+    const extra = typeof alsoWrite === 'function' ? alsoWrite(seq) : alsoWrite
+    await this.storage.putAll({ ...extra, [key(seq)]: full, [SEQ_KEY]: seq })
     if (seq > this.cap) await this.storage.delete(key(seq - this.cap))
     return full
+  }
+
+  async get(seq: number): Promise<HistoryItem | undefined> {
+    return this.storage.get<HistoryItem>(key(seq))
   }
 
   async lastSeq(): Promise<number> {

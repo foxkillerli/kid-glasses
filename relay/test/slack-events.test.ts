@@ -118,3 +118,28 @@ describe('routeSlackEvent: bot-DM model', () => {
     expect(routeSlackEvent(env({ subtype: 'message_changed', message: { ...kidBot } }), KID)).toMatchObject({ kind: 'kid-message', message: { kind: 'edit' } })
   })
 })
+
+describe('routeSlackEvent: pairing commands', () => {
+  const fox = (text: string, extra: Record<string, unknown> = {}) => env({ user: FOX, text, ts: '1.1', ...extra })
+
+  it('routes a plain message from Fox "配对 123456" as pair-confirm', () => {
+    expect(routeSlackEvent(fox('配对 123456'), KID)).toEqual({ kind: 'pair-confirm', code: '123456', user: FOX, eventId: 'Ev1' })
+    expect(routeSlackEvent(fox(' 配对123456 '), KID)).toMatchObject({ kind: 'pair-confirm', code: '123456' })
+    expect(routeSlackEvent(fox('撤销配对'), KID)).toEqual({ kind: 'pair-revoke', user: FOX, eventId: 'Ev1' })
+  })
+
+  it('rejects app-marked or subtyped messages, so the relay\'s own user-token posts can never confirm', () => {
+    for (const extra of [{ app_id: 'A1' }, { bot_id: 'B1' }, { bot_profile: { id: 'B1' } }, { subtype: 'bot_message' }, { subtype: 'thread_broadcast' }, { hidden: true }]) {
+      expect(routeSlackEvent(fox('配对 123456', extra), KID)).toEqual({ kind: 'ignore', reason: 'pair-app-marked' })
+    }
+    expect(routeSlackEvent(env({ subtype: 'message_changed', message: { user: FOX, text: '配对 123456', ts: '1' }, previous_message: { text: 'x' } }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+  })
+
+  it('rejects someone other than the installing user, other channels, and wrong formats', () => {
+    expect(routeSlackEvent(env({ user: 'UOTHER0001', text: '配对 123456', ts: '1' }), KID)).toEqual({ kind: 'ignore', reason: 'pair-not-installer' })
+    expect(routeSlackEvent(fox('配对 123456', { channel: 'D9999999999' }), KID)).toEqual({ kind: 'ignore', reason: 'other-channel' })
+    expect(routeSlackEvent(fox('配对 12345'), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+    expect(routeSlackEvent(fox('请配对 123456'), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+    expect(routeSlackEvent(fox('配对 １２３４５６'), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+  })
+})
