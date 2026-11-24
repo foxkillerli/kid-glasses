@@ -1,0 +1,14 @@
+{
+  "package_id": "com.foxkiller.kidglasses",
+  "edition": "202601",
+  "name": "Kid Glasses M0",
+  "version": "0.0.1",
+  "min_sdk_version": "0.0.16",
+  "entrypoint": "index.html",
+  "permissions": [
+    { "name": "g2-microphone", "desc": "M0 probe: capture audio from the G2 glasses mic to measure bytes, duration and level. Audio stays in memory on the phone." },
+    { "name": "phone-microphone", "desc": "M0 probe: compare the phone mic against the glasses mic. Audio stays in memory on the phone." },
+    { "name": "network", "desc": "M0 probe: public WebSocket echo used to test whether a socket survives backgrounding.", "whitelist": ["wss://echo.websocket.org"] }
+  ],
+  "supported_languages": ["en", "zh"]
+}
