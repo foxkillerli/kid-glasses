@@ -132,6 +132,7 @@ The upload JWT is a short-lived per-upload token, not an account credential. Nev
 
 | Page | Swipe | Tap | Double-tap | Hold |
 |---|---|---|---|---|
+| Kid (start page) | down = newer page, up = older | start / stop talking; while pairing: new code | menu | hold = talk, release = send |
 | Menu | move cursor | open | exit dialog | – |
 | Glyph / Capacity | down = next, up = prev | – | back to menu | – |
 | Mic | – | start / stop | stop and back to menu | hold = record, release = stop |
@@ -139,10 +140,12 @@ The upload JWT is a short-lived per-upload token, not an account credential. Nev
 
 ## Network whitelist and CORS
 
-`app.json` asks for `g2-microphone` and `network` only; `phone-microphone` was removed because the plugin records from the glasses mic only. The network whitelist holds exactly the deployed origin, in its two schemes:
+`app.json` asks for `g2-microphone` and `network` only; `phone-microphone` was removed because the plugin records from the glasses mic only. The network whitelist holds the plugin's own origin and the relay, each in two schemes:
 
 - `https://kid-glasses-m0.your-subdomain.workers.dev`
 - `wss://kid-glasses-m0.your-subdomain.workers.dev`
+- `https://kid-glasses-relay.your-subdomain.workers.dev`: pairing (`/pair/start`, `/pair/poll`)
+- `wss://kid-glasses-relay.your-subdomain.workers.dev`: `/device`, for messages and speech
 
 How the background probe picks its echo:
 
@@ -151,13 +154,27 @@ How the background probe picks its echo:
 
 All requests are same-origin. Static assets also carry `Access-Control-Allow-Origin: *` through `public/_headers`, and `index.html` is served with `Cache-Control: no-cache`, so a redeploy shows up on the next scan.
 
-## Roadmap note: M1 relay
+## M1: talking to Kid
 
-M1 will deploy the relay to **Cloudflare Workers + a Durable Object**, through claude-relay's already-authorized Cloudflare MCP (no `wrangler login`).
+The plugin opens on the **Kid** page.
 
-- The relay code is in `relay/`. It was deployed on 2026-11-25 as Worker `kid-glasses-relay` with a SQLite Durable Object `RelayHub`. No secrets are set; Fox enters them.
-- M0's only Cloudflare footprint is the static test host `kid-glasses-m0`: no bindings, no secrets.
-- Secrets (Slack, Deepgram and so on) are entered only by Fox, never committed. Fox's steps are in `docs/M1-FOX-SETUP.md`.
+**Pairing.** On first start it has no device token. It gets a 6-digit code from the relay and shows it on the lens. Fox types `配对 <code>` in his Slack DM with Kid. The plugin then receives its own token and stores it in the SDK's local storage. No token is ever typed into the plugin or built into the bundle. Details are in [`relay/README.md`](relay/README.md#device-pairing).
+
+**Talking.** Hold to talk and release to send, or tap to start and tap again to send.
+
+- Audio comes from the G2 glasses mic only, through the same `checkFrameSource` gate as M0.
+- It streams to the relay (Deepgram); the transcript is posted to Slack as `〔眼镜〕…` and Kid's webhook is called.
+- Kid's replies appear on the lens, paginated with `LENS_TEXT`.
+
+**Connection** (`src/lib/relay-client.ts`):
+
+- First frame `auth`, then `hello {lastSeq}` and one history page.
+- `ping` every 25 s; reconnect after 70 s without any frame.
+- Exponential backoff with jitter (1–30 s). Reconnects immediately on visible / pageshow / online / foreground.
+- `lastSeq` and unacknowledged typed turns persist across the background reload.
+- Typed turns are resent with the same `cid` and the relay dedupes them.
+
+The plugin is still served from `kid-glasses-m0`, so the QR code is unchanged. The relay is Worker `kid-glasses-relay`, with a SQLite Durable Object `RelayHub`. Secrets are entered only by Fox ([`docs/M1-FOX-SETUP.md`](docs/M1-FOX-SETUP.md)). Fox's device test is [`docs/M1-DEVICE-TEST.md`](docs/M1-DEVICE-TEST.md).
 
 ## Real-device test plan
 

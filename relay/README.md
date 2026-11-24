@@ -5,7 +5,7 @@ This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 pl
 - **Glasses → Kid.** Speech, or typed text, is posted into the Kid DM channel as Fox, using Fox's user token. Each post starts with `〔眼镜〕`.
 - **Kid → glasses.** Kid's replies in that DM are pushed back to the glasses.
 
-**Status: deployed 2026-11-25, no secrets set.**
+**Status (2026-11-25): deployed and configured.** Seven secrets are set by Fox: `SLACK_USER_TOKEN`, `SLACK_SIGNING_SECRET`, `KID_DM_CHANNEL_ID`, `DEEPGRAM_API_KEY`, `DEVICE_TOKEN`, `KID_WEBHOOK_URL`, `KID_WEBHOOK_SECRET`. Workers Logs are on (`observability.enabled`, `head_sampling_rate 1`). Devices pair through Fox's Slack DM (see "Device pairing").
 
 - URL: <https://kid-glasses-relay.your-subdomain.workers.dev>
 - Slack Events request URL: `https://kid-glasses-relay.your-subdomain.workers.dev/slack/events`
@@ -36,7 +36,9 @@ There was no `wrangler login`; the deploy went through the Cloudflare MCP:
 On a redeploy:
 
 - Do **not** resend the `v1` migration. Send migrations only when the classes change.
-- Add `"keep_bindings": ["secret_text"]` to the metadata so the secrets Fox has set survive the script upload. This is not yet verified on this Worker; check `/health` straight after the redeploy.
+- Add `"keep_bindings": ["secret_text"]` to the metadata so the secrets Fox has set survive the script upload. Verified twice on 2026-11-25: the secret names were the same before and after, and `/health` stayed true.
+- Send `"observability": {"enabled": true, "head_sampling_rate": 1}` in the metadata, to match `wrangler.jsonc`.
+- Check `/health` straight after the redeploy, and compare the names of the secret bindings before and after.
 - Never list or print secret values.
 
 ## Layout
@@ -158,10 +160,10 @@ Each route fails closed when its secret is missing:
 
 | Message | Meaning |
 |---|---|
-| `{"t":"auth","token":"…"}` | Must be the first frame |
+| `{"t":"auth","token":"…"}` | Must be the first frame. `token` is `DEVICE_TOKEN` or a paired device token (`kgd_…`) |
 | `{"t":"hello","lastSeq":N}` | The relay replies with `hello` and replays every retained message after `N` |
-| `{"t":"say","text":"…"}` | Post text to Kid |
-| `{"t":"audio.start"}` | Start a speech turn |
+| `{"t":"say","text":"…","cid":"…"}` | Post text to Kid. `cid` (8–64 of `A-Za-z0-9_-`, e.g. a UUID) is optional. A repeated `cid` is not posted again: the relay re-acks with `posted {seq, cid, dup: true}` |
+| `{"t":"audio.start","cid":"…"}` | Start a speech turn. The transcript is posted with this `cid` |
 | binary frames | PCM 16 kHz s16le mono, about 3200 B per 100 ms |
 | `{"t":"audio.stop"}` | End the turn. Deepgram's final transcript is posted to Kid. If the stream fails or closes before the stop, the relay sends `error asr-interrupted` and posts nothing |
 | `{"t":"history","before":seq,"limit":n}` | Fetch older messages |
@@ -176,11 +178,18 @@ Each route fails closed when its secret is missing:
 | `hello` | Greeting, with `lastSeq` |
 | `msg` | A message: `from` = `kid` / `glasses` / `fast`, plus `session`, and `edited` on edits |
 | `asr.partial` / `asr.final` | Live and final transcript |
-| `posted` | The message reached Slack |
+| `posted` | The message reached Slack: `seq`, `text`, `cid` if one was given, `dup: true` for a re-ack |
 | `kid-webhook` | `seq`, `result` = `ok` / `skipped` / `failed`, and `status`. Sent after each `posted` |
 | `history` | A page of older messages |
-| `error` | `code` and `message` |
+| `error` | `code`, `message`, and `cid` when the error belongs to a turn (`asr-interrupted`, `asr-empty`, `asr-connect-failed`, Slack post failures) |
 | `pong` | Reply to `ping` |
+
+**Resend without double posting.** The plugin keeps every `say` it has not seen acknowledged in a persisted outbox. After each reconnect, and after a page reload, it sends them again with the same `cid`.
+
+- The relay keeps `meta:cids` (at most 300 entries, 24 h). It is written atomically with the history entry, and every post runs through one queue, so concurrent duplicates also post once.
+- A duplicate is answered from history and never calls Slack or the Kid webhook.
+- `msg` / `history` items for glasses turns carry their `cid`, so a replay clears the outbox as well.
+- A voice turn cannot be resent: the audio is not kept. If the socket drops mid-turn, the relay reports `asr-interrupted` and posts nothing.
 
 **Sessions and threads.** The first post of a session starts a new Slack thread. Later posts reply in that thread. A session ends after 30 min idle, or on `session.new`.
 
@@ -189,6 +198,48 @@ Each route fails closed when its secret is missing:
 - A late Kid reply cannot revive an expired session.
 
 **Slack delivery.** `/slack/events` waits for the DO to store the message before it returns 200. On failure it returns 500, so Slack retries. The history entry is written before the event id is marked seen.
+
+## Device pairing
+
+The device token never passes through a chat and is not in the public bundle. A device gets its own token by pairing:
+
+1. The plugin, which has no token yet, calls `POST /pair/start`.
+   - The relay answers `{pairId, code, expiresAt}`: `pairId` is 128 random bits, `code` is 6 digits, and the pairing expires after 5 min.
+   - Limits: 3 starts per minute per client, and at most 5 active pairings. The client key is `sha256(CF-Connecting-IP)[:16]`, kept in memory only and never logged.
+2. The lens shows the code. Fox types `配对 123456` by hand in the Fox ↔ Kid DM.
+3. The router treats it as a confirmation only if **all** of these hold:
+   - It is in `KID_DM_CHANNEL_ID`.
+   - It has no `subtype`, `bot_id`, `app_id`, `bot_profile` or `hidden`. The relay's own user-token posts carry `app_id` / `bot_profile`, so they can never confirm.
+   - The sender is the installing user from `authorizations`, if present.
+4. The hub then requires `user == auth.test user id` (Fox).
+5. The code is compared in constant time and is single use. After 5 wrong codes within 10 min, confirmations are locked for 10 min and pending pairings are cleared.
+6. The plugin polls `POST /pair/poll {pairId}` (60 per minute per client). Once Fox has confirmed, the relay mints `kgd_<64 hex>` and returns it **once** as `{status: "paired", token, deviceId}`. It stores only the token's sha256, in `pair:devices` (at most 10 devices, oldest dropped).
+7. The plugin keeps the token in the SDK's local storage (`bridge.setLocalStorage`).
+
+Device auth accepts `DEVICE_TOKEN` or a paired token. A rejected paired token (close 4401) makes the plugin forget it and pair again.
+
+**Revoking.**
+
+- Fox sends `撤销配对` in the same DM, with the same checks as above. All paired tokens are deleted and paired sockets are closed with 4401 `revoked`.
+- Rotating `DEVICE_TOKEN` does **not** revoke paired tokens, and `撤销配对` does not affect `DEVICE_TOKEN`.
+- Fallback without Slack: delete the DO storage keys `pair:devices` and `pair:pending`. The other DO keys (history, session) are unaffected.
+
+**Notes.**
+
+- The `配对` / `撤销配对` messages are never shown on the glasses and are not glasses turns.
+- Kid also sees them in the DM and may reply. That reply is shown on the glasses like any other Kid message.
+- CORS on `/pair/*` is `*` (no cookies are involved). The plugin sends `Content-Type: text/plain`, so there is no preflight; `OPTIONS` is answered anyway.
+
+## Logging (Workers Logs)
+
+`console.log` lines start with `[relay]`.
+
+- **Allowed in logs:** event kinds, drop reasons, internal ids (`seq`, device id), HTTP status codes, attempt counts, text lengths. Slack user/bot ids appear once per Kid sender, for the allowlist.
+- **Never logged:** message text, transcripts, Slack event bodies, tokens, secrets, the webhook URL, `DEVICE_TOKEN`, paired tokens, pair codes, pair ids, channel ids, client IPs.
+- Fox's DMs with other people are dropped silently (`other-channel` is not logged).
+- Errors whose message we do not control (for example a thrown `fetch` error) reach the device only as a generic message, and the log gets only the error name.
+- `test/log-guard.test.ts` spies on `console.*` and drives say, Slack post failures, the webhook, device auth, Kid replies, ASR failure, pairing and the Worker entry routes with sentinel values. It asserts that none of them appear in the logs.
+- Cloudflare's own invocation log also records request metadata such as the URL and method. Which headers it records is not verified. By design no secret travels in a URL or header: the device token is the first WebSocket frame, and pair ids are in POST bodies.
 
 ## Develop
 
