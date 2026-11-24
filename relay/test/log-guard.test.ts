@@ -111,9 +111,9 @@ describe('logs never contain secrets, ids that identify channels, or message tex
   it('pairing: codes, pair ids and minted tokens never reach the log', async () => {
     const { core } = hub(slackOk, async () => new Response('ok'))
     const s = (await core.pairRequest('/pair/start', null, 'c'))!.body as { pairId: string; code: string }
-    await core.pairRequest('/pair-confirm', { user: 'UNOTFOX01', code: s.code }, 'slack')
-    await core.pairRequest('/pair-confirm', { user: FOX, code: s.code === '000000' ? '111111' : '000000' }, 'slack')
-    await core.pairRequest('/pair-confirm', { user: FOX, code: s.code }, 'slack')
+    await core.pairRequest('/pair-confirm', { user: 'UNOTFOX01', code: s.code, eventId: 'g1', atMs: Date.now() }, 'slack')
+    await core.pairRequest('/pair-confirm', { user: FOX, code: s.code === '000000' ? '111111' : '000000', eventId: 'g2', atMs: Date.now() }, 'slack')
+    await core.pairRequest('/pair-confirm', { user: FOX, code: s.code, eventId: 'g3', atMs: Date.now() }, 'slack')
     const r = (await core.pairRequest('/pair/poll', { pairId: s.pairId }, 'c'))!.body as { token: string }
     const ws = new FakeDevice(false)
     await core.onDeviceMessage(ws, JSON.stringify({ t: 'auth', token: r.token }))

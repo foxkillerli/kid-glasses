@@ -14,12 +14,23 @@ export const DEVICE_TOKEN_PREFIX = 'kgd_'
 export const PENDING_KEY = 'pair:pending'
 export const DEVICES_KEY = 'pair:devices'
 export const FAILS_KEY = 'pair:fails'
+export const EVENTS_KEY = 'pair:events'
+export const EVENTS_CAP = 200
+export const MAX_PENDING_PER_CLIENT = 2
+export const CONFIRM_SKEW_MS = 60_000
 
 export interface PendingPair {
   pairId: string
   code: string
+  createdAt: number
   expiresAt: number
   confirmed: boolean
+  client: string
+}
+
+export interface CommandMeta {
+  eventId: string
+  atMs: number
 }
 
 export interface PairedDevice {
@@ -37,10 +48,11 @@ interface FailState {
 export type StartResult = { ok: true; pairId: string; code: string; expiresAt: number } | { ok: false; error: 'rate-limited' | 'busy' }
 export type PollResult =
   | { status: 'pending'; expiresAt: number }
-  | { status: 'paired'; token: string; deviceId: string }
+  | { status: 'paired'; token: string; deviceId: string; evicted: string[] }
   | { status: 'expired' }
   | { status: 'rate-limited' }
-export type ConfirmResult = { ok: true } | { ok: false; reason: 'locked' | 'no-match' }
+export type ConfirmResult = { ok: true } | { ok: false; reason: 'locked' | 'no-match' | 'duplicate-event' }
+export type RevokeResult = { ok: true; revoked: string[] } | { ok: false; reason: 'duplicate-event' }
 
 export interface PairingDeps {
   storage: KvStorage
@@ -86,7 +98,9 @@ export class Pairing {
     }
     recent.push(now)
     this.hits.set(key, recent)
-    if (this.hits.size > 1000) this.hits.clear()
+    if (this.hits.size > 1000) {
+      for (const [k, v] of this.hits) if (!v.some(t => now - t < 60_000)) this.hits.delete(k)
+    }
     return false
   }
 
@@ -106,37 +120,53 @@ export class Pairing {
   start(client: string): Promise<StartResult> {
     return this.serial(async () => {
       if (this.limited('start', client, START_LIMIT_PER_MIN)) return { ok: false, error: 'rate-limited' }
-      const list = await this.pending()
+      let list = await this.pending()
+      const mine = list.filter(p => p.client === client && !p.confirmed)
+      if (mine.length >= MAX_PENDING_PER_CLIENT) list = list.filter(p => p !== mine[0])
       if (list.length >= MAX_PENDING) return { ok: false, error: 'busy' }
       let code = this.sixDigits()
       while (list.some(p => p.code === code)) code = this.sixDigits()
-      const entry: PendingPair = { pairId: hex(this.randomBytes(16)), code, expiresAt: this.deps.now() + PAIR_TTL_MS, confirmed: false }
+      const now = this.deps.now()
+      const entry: PendingPair = { pairId: hex(this.randomBytes(16)), code, createdAt: now, expiresAt: now + PAIR_TTL_MS, confirmed: false, client }
       await this.deps.storage.put(PENDING_KEY, [...list, entry])
       return { ok: true, pairId: entry.pairId, code: entry.code, expiresAt: entry.expiresAt }
     })
   }
 
-  confirm(code: string): Promise<ConfirmResult> {
+  private async seenEvent(eventId: string): Promise<{ seen: boolean; next: string[] }> {
+    const events = (await this.deps.storage.get<string[]>(EVENTS_KEY)) ?? []
+    return { seen: events.includes(eventId), next: [...events, eventId].slice(-EVENTS_CAP) }
+  }
+
+  confirm(code: string, meta: CommandMeta): Promise<ConfirmResult> {
     return this.serial(async () => {
+      const ev = await this.seenEvent(meta.eventId)
+      if (ev.seen) return { ok: false, reason: 'duplicate-event' }
       const now = this.deps.now()
       const fails = (await this.deps.storage.get<FailState>(FAILS_KEY)) ?? { count: 0, windowStart: now, lockedUntil: 0 }
-      if (fails.lockedUntil > now) return { ok: false, reason: 'locked' }
+      if (fails.lockedUntil > now) {
+        await this.deps.storage.put(EVENTS_KEY, ev.next)
+        return { ok: false, reason: 'locked' }
+      }
       const list = await this.pending()
       let hit: PendingPair | null = null
-      for (const p of list) if (!p.confirmed && timingSafeEqual(p.code, code) && !hit) hit = p
+      for (const p of list) {
+        const inWindow = meta.atMs >= p.createdAt - CONFIRM_SKEW_MS && meta.atMs <= p.expiresAt
+        if (!p.confirmed && inWindow && timingSafeEqual(p.code, code) && !hit) hit = p
+      }
       if (hit) {
         hit.confirmed = true
-        await this.deps.storage.putAll({ [PENDING_KEY]: list, [FAILS_KEY]: { count: 0, windowStart: now, lockedUntil: 0 } })
+        await this.deps.storage.putAll({ [PENDING_KEY]: list, [FAILS_KEY]: { count: 0, windowStart: now, lockedUntil: 0 }, [EVENTS_KEY]: ev.next })
         return { ok: true }
       }
       const fresh = now - fails.windowStart > FAIL_WINDOW_MS ? { count: 0, windowStart: now, lockedUntil: 0 } : fails
       const next: FailState = { ...fresh, count: fresh.count + 1 }
       if (next.count >= MAX_FAILED_CONFIRMS) {
         next.lockedUntil = now + LOCKOUT_MS
-        await this.deps.storage.putAll({ [FAILS_KEY]: next, [PENDING_KEY]: [] })
+        await this.deps.storage.putAll({ [FAILS_KEY]: next, [PENDING_KEY]: [], [EVENTS_KEY]: ev.next })
         return { ok: false, reason: 'locked' }
       }
-      await this.deps.storage.put(FAILS_KEY, next)
+      await this.deps.storage.putAll({ [FAILS_KEY]: next, [EVENTS_KEY]: ev.next })
       return { ok: false, reason: 'no-match' }
     })
   }
@@ -151,10 +181,12 @@ export class Pairing {
       if (!hit.confirmed) return { status: 'pending', expiresAt: hit.expiresAt }
       const token = DEVICE_TOKEN_PREFIX + hex(this.randomBytes(32))
       const device: PairedDevice = { id: hex(this.randomBytes(6)), hash: await sha256Hex(token), createdAt: this.deps.now() }
-      const devices = [...((await this.deps.storage.get<PairedDevice[]>(DEVICES_KEY)) ?? []), device].slice(-MAX_DEVICES)
+      const all = [...((await this.deps.storage.get<PairedDevice[]>(DEVICES_KEY)) ?? []), device]
+      const devices = all.slice(-MAX_DEVICES)
+      const evicted = all.slice(0, Math.max(0, all.length - MAX_DEVICES)).map(d => d.id)
       const remaining = list.filter(p => p !== hit)
       await this.deps.storage.putAll({ [DEVICES_KEY]: devices, [PENDING_KEY]: remaining })
-      return { status: 'paired', token, deviceId: device.id }
+      return { status: 'paired', token, deviceId: device.id, evicted }
     })
   }
 
@@ -167,11 +199,19 @@ export class Pairing {
     return id
   }
 
-  revokeAll(): Promise<number> {
+  revokeAll(meta: CommandMeta): Promise<RevokeResult> {
     return this.serial(async () => {
+      const ev = await this.seenEvent(meta.eventId)
+      if (ev.seen) return { ok: false, reason: 'duplicate-event' }
       const devices = (await this.deps.storage.get<PairedDevice[]>(DEVICES_KEY)) ?? []
-      await this.deps.storage.putAll({ [DEVICES_KEY]: [], [PENDING_KEY]: [] })
-      return devices.length
+      const pending = (await this.deps.storage.get<PendingPair[]>(PENDING_KEY)) ?? []
+      const revoked = devices.filter(d => d.createdAt <= meta.atMs)
+      await this.deps.storage.putAll({
+        [DEVICES_KEY]: devices.filter(d => d.createdAt > meta.atMs),
+        [PENDING_KEY]: pending.filter(p => p.createdAt > meta.atMs),
+        [EVENTS_KEY]: ev.next,
+      })
+      return { ok: true, revoked: revoked.map(d => d.id) }
     })
   }
 

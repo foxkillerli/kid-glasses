@@ -90,6 +90,24 @@ export class KidDmClient {
     }
   }
 
+  async findOwnPost(text: string, threadTs: string | null, sinceMs: number): Promise<PostResult | null> {
+    const channel = this.kidChannelId ?? ''
+    this.assertAllowed(channel)
+    if (!this.userToken || !this.userToken.startsWith('xoxp-')) throw new SlackConfigError('SLACK_USER_TOKEN is missing or is not a user token (xoxp-)')
+    const self = await this.selfUserId()
+    if (!self) throw new SlackApiError('self_unknown')
+    const oldest = (Math.floor(sinceMs / 1000) - 60).toString()
+    const params = new URLSearchParams({ channel, oldest, limit: '200', inclusive: 'true' })
+    if (threadTs) params.set('ts', threadTs)
+    const method = threadTs ? 'conversations.replies' : 'conversations.history'
+    const res = await this.fetchFn(`https://slack.com/api/${method}?${params}`, { method: 'GET', headers: { Authorization: `Bearer ${this.userToken}` } })
+    if (res.status === 429) throw new SlackApiError('ratelimited', Number(res.headers.get('Retry-After') ?? '1'))
+    const data = (await res.json()) as { ok?: boolean; error?: string; messages?: Array<{ ts?: string; user?: string; text?: string }> }
+    if (!data.ok) throw new SlackApiError(data.error ?? `http_${res.status}`)
+    const hit = (data.messages ?? []).find(m => m.user === self && m.text === text && typeof m.ts === 'string')
+    return hit ? { ts: hit.ts as string, channel } : null
+  }
+
   postToKid(text: string, threadTs: string | null): Promise<PostResult> {
     return this.postMessage(this.kidChannelId ?? '', text, threadTs)
   }

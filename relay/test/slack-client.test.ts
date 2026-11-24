@@ -71,3 +71,35 @@ describe('KidDmClient.selfUserId', () => {
     expect(await new KidDmClient('xoxb-bot', KID, f).selfUserId()).toBeNull()
   })
 })
+
+describe('KidDmClient.findOwnPost (reconcile an uncertain post)', () => {
+  const TOKEN = ['xoxp', 'fake', 'token'].join('-')
+  const CH = 'D0123ABCDEF'
+  function client(messages: Array<Record<string, unknown>>, status = 200) {
+    const urls: string[] = []
+    const fetchFn = async (url: string) => {
+      urls.push(url)
+      if (url.includes('auth.test')) return Response.json({ ok: true, user_id: 'UFOX0001' })
+      return status === 429 ? new Response('', { status: 429, headers: { 'Retry-After': '3' } }) : Response.json({ ok: true, messages })
+    }
+    return { c: new KidDmClient(TOKEN, CH, fetchFn as unknown as typeof fetch), urls }
+  }
+
+  it('searches the thread with conversations.replies, or the DM with conversations.history, and matches own text only', async () => {
+    const msgs = [
+      { ts: '1.1', user: 'UKIDBOT01', text: '〔眼镜〕hi' },
+      { ts: '1.2', user: 'UFOX0001', text: '〔眼镜〕hi' },
+    ]
+    const a = client(msgs)
+    expect(await a.c.findOwnPost('〔眼镜〕hi', '1.0', 1_700_000_000_000)).toEqual({ ts: '1.2', channel: CH })
+    expect(a.urls.find(u => u.includes('conversations.replies'))).toContain('ts=1.0')
+    const b = client(msgs)
+    expect(await b.c.findOwnPost('〔眼镜〕other', null, 1_700_000_000_000)).toBeNull()
+    expect(b.urls.some(u => u.includes('conversations.history'))).toBe(true)
+  })
+
+  it('throws on rate limiting so the caller does not post blindly', async () => {
+    const { c } = client([], 429)
+    await expect(c.findOwnPost('x', null, 0)).rejects.toThrow('ratelimited')
+  })
+})

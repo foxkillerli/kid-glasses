@@ -10,6 +10,7 @@ export type ClientMessage =
   | { t: 'say'; text: string; cid?: string }
   | { t: 'audio.start'; cid?: string }
   | { t: 'audio.stop' }
+  | { t: 'audio.cancel' }
   | { t: 'history'; before?: number; limit?: number }
   | { t: 'session.new' }
 
@@ -17,6 +18,7 @@ export type ServerMessage =
   | { t: 'auth.ok' }
   | { t: 'hello'; session: string; lastSeq: number; fastLane: boolean }
   | { t: 'pong' }
+  | { t: 'replay.done'; upTo: number }
   | ({ t: 'msg' } & WireItem)
   | { t: 'asr.partial'; text: string }
   | { t: 'asr.final'; text: string }
@@ -60,8 +62,9 @@ export function parseClientMessage(data: string): Parsed {
       return { ok: true, msg: o.cid ? { t: 'audio.start', cid: o.cid as string } : { t: 'audio.start' } }
     case 'ping':
     case 'audio.stop':
+    case 'audio.cancel':
     case 'session.new':
-      return { ok: true, msg: { t: o.t as 'ping' | 'audio.stop' | 'session.new' } }
+      return { ok: true, msg: { t: o.t as 'ping' | 'audio.stop' | 'audio.cancel' | 'session.new' } }
     case 'say':
       if (typeof o.text !== 'string' || !o.text.trim()) return { ok: false, error: 'empty-text' }
       if (o.text.length > MAX_SAY_CHARS) return { ok: false, error: 'text-too-long' }

@@ -43,8 +43,8 @@ export async function handleSlackEvents(request: Request, env: Env, nowSeconds: 
     route.kind === 'kid-message'
       ? ['/kid-message', route.message]
       : route.kind === 'pair-confirm'
-        ? ['/pair-confirm', { code: route.code, user: route.user }]
-        : ['/pair-revoke', { user: route.user }]
+        ? ['/pair-confirm', { code: route.code, user: route.user, eventId: route.eventId, atMs: route.atMs }]
+        : ['/pair-revoke', { user: route.user, eventId: route.eventId, atMs: route.atMs }]
   relayLog(`slack event routed kind=${route.kind}`)
   try {
     const res = await hubStub(env).fetch(`https://hub${path}`, {

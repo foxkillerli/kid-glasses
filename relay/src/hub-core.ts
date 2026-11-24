@@ -27,7 +27,11 @@ export interface HubDeps {
   storage: KvStorage
   sockets: () => DeviceSocket[]
   deviceToken?: string
-  slack: { postToKid(text: string, threadTs: string | null): Promise<PostResult>; selfUserId(): Promise<string | null> }
+  slack: {
+    postToKid(text: string, threadTs: string | null): Promise<PostResult>
+    selfUserId(): Promise<string | null>
+    findOwnPost?(text: string, threadTs: string | null, sinceMs: number): Promise<PostResult | null>
+  }
   asr: { connect(): Promise<AsrSocket> } | null
   fastLane: FastLane
   kidWebhook?: KidWebhook | null
@@ -51,7 +55,7 @@ export const EDITED_MARK = '（已修改）'
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SEEN_CAP = 200
 export const CIDS_KEY = 'meta:cids'
-export const CID_CAP = 300
+export const CID_CAP = 1000
 export const CID_TTL_MS = 24 * 60 * 60 * 1000
 export const PENDING_AUDIO_CAP = 100
 export const CLOSE_UNAUTHORIZED = 4401
@@ -64,13 +68,16 @@ interface AsrTurn {
   stopRequested: boolean
   finished: boolean
   cid: string | undefined
+  cancelled?: boolean
   resolve: (text: string | null) => void
 }
 
 interface CidEntry {
   cid: string
-  seq: number
+  seq?: number
   at: number
+  state: 'sending' | 'uncertain' | 'posted'
+  threadTs?: string | null
 }
 
 export interface DeviceAttachment extends SocketAttachment {
@@ -125,7 +132,7 @@ export class HubCore {
 
   private async liveCids(): Promise<CidEntry[]> {
     const now = this.deps.now()
-    return ((await this.deps.storage.get<CidEntry[]>(CIDS_KEY)) ?? []).filter(c => now - c.at < CID_TTL_MS)
+    return ((await this.deps.storage.get<CidEntry[]>(CIDS_KEY)) ?? []).filter(c => now - c.at < CID_TTL_MS).map(c => ({ ...c, state: c.state ?? 'posted' }))
   }
 
   private async sessionForThread(threadTs: string | null): Promise<string | null> {
@@ -182,7 +189,10 @@ export class HubCore {
         const session = await this.enqueue(() => this.currentSession())
         const lastSeq = await this.history.lastSeq()
         this.send(ws, { t: 'hello', session: session.id, lastSeq, fastLane: this.deps.fastLane.enabled })
-        if (m.lastSeq !== undefined) await this.replay(ws, m.lastSeq, lastSeq)
+        if (m.lastSeq !== undefined) {
+          await this.replay(ws, m.lastSeq, lastSeq)
+          this.send(ws, { t: 'replay.done', upTo: lastSeq })
+        }
         return
       }
       case 'ping':
@@ -196,6 +206,9 @@ export class HubCore {
         return
       case 'audio.stop':
         this.stopAsr('device')
+        return
+      case 'audio.cancel':
+        this.cancelAsr('device')
         return
       case 'history': {
         const page = await this.history.page(m.before ?? null, m.limit ?? 20)
@@ -240,10 +253,15 @@ export class HubCore {
     return this.enqueue(() => this.postNow(raw, cid))
   }
 
+  private async putCids(list: CidEntry[]): Promise<void> {
+    await this.deps.storage.put(CIDS_KEY, list.slice(-CID_CAP))
+  }
+
   private async postNow(raw: string, cid?: string): Promise<HistoryItem | null> {
     const cids = cid ? await this.liveCids() : []
     const known = cid ? cids.find(c => c.cid === cid) : undefined
-    if (cid && known) {
+    const others = cids.filter(c => c !== known)
+    if (cid && known?.state === 'posted' && known.seq !== undefined) {
       const prior = await this.history.get(known.seq)
       this.log(`say duplicate cid seq=${known.seq}`)
       this.broadcast({ t: 'posted', seq: known.seq, text: prior?.text ?? '', cid, dup: true })
@@ -255,39 +273,74 @@ export class HubCore {
       return null
     }
     const session = await this.currentSession()
+    if (cid && known) {
+      const find = this.deps.slack.findOwnPost
+      let found: PostResult | null = null
+      try {
+        if (!find) throw new Error('no reconcile')
+        found = await find.call(this.deps.slack, slackText, known.threadTs ?? null, known.at)
+      } catch (err) {
+        this.log(`say reconcile failed ${errorName(err)}`)
+        this.broadcast({ t: 'error', code: 'slack-unreachable', message: 'could not check whether the last attempt reached Slack', cid })
+        return null
+      }
+      if (found) {
+        this.log('say reconciled: earlier attempt had reached Slack')
+        return this.recordPosted(raw, cid, others, session, known.threadTs ?? null, found, true)
+      }
+    }
+    if (cid) await this.putCids([...others, { cid, state: 'sending', at: this.deps.now(), threadTs: session.threadTs }])
     let posted: PostResult
     try {
       posted = await this.deps.slack.postToKid(slackText, session.threadTs)
     } catch (err) {
       const e = err as Error
       this.log(`slack post failed ${errorName(e)}`)
-      const known = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError || e instanceof SlackApiError
-      this.broadcast({ t: 'error', code: known ? e.name : 'slack-unreachable', message: known ? e.message : 'could not reach Slack', ...(cid ? { cid } : {}) })
+      const definite = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError || e instanceof SlackApiError
+      if (cid) await this.putCids(definite ? others : [...others, { cid, state: 'uncertain', at: this.deps.now(), threadTs: session.threadTs }])
+      this.broadcast({ t: 'error', code: definite ? e.name : 'slack-unreachable', message: definite ? e.message : 'could not reach Slack', ...(cid ? { cid } : {}) })
       return null
     }
-    const next: Session = { ...session, threadTs: session.threadTs ?? posted.ts, lastAt: this.deps.now() }
-    const sessionWrites: Record<string, unknown> = { [SESSION_KEY]: next }
-    if (!session.threadTs && next.threadTs) sessionWrites[THREAD_PREFIX + next.threadTs] = next.id
-    await this.deps.storage.putAll(sessionWrites)
+    return this.recordPosted(raw, cid, others, session, session.threadTs, posted, false)
+  }
+
+  private async recordPosted(
+    raw: string,
+    cid: string | undefined,
+    others: CidEntry[],
+    session: Session,
+    postedThreadTs: string | null,
+    posted: PostResult,
+    reconciled: boolean,
+  ): Promise<HistoryItem> {
+    const current = await this.deps.storage.get<Session>(SESSION_KEY)
+    const sameSession = current?.id === session.id
+    const threadTs = postedThreadTs ?? posted.ts
+    const base = sameSession && current ? current : session
+    const next: Session = { ...base, threadTs: base.threadTs ?? threadTs, lastAt: this.deps.now() }
+    const sessionWrites: Record<string, unknown> = {}
+    if (sameSession) sessionWrites[SESSION_KEY] = next
+    if (!postedThreadTs) sessionWrites[THREAD_PREFIX + threadTs] = session.id
+    if (Object.keys(sessionWrites).length) await this.deps.storage.putAll(sessionWrites)
     const item = await this.history.append(
       {
         from: 'glasses',
         text: cleanText(raw),
         slackTs: posted.ts,
-        threadTs: next.threadTs,
-        session: next.id,
+        threadTs,
+        session: session.id,
         ...(cid ? { cid } : {}),
         at: this.deps.now(),
       },
-      (seq: number): Record<string, unknown> => (cid ? { [CIDS_KEY]: [...cids, { cid, seq, at: this.deps.now() }].slice(-CID_CAP) } : {}),
+      (seq: number): Record<string, unknown> => (cid ? { [CIDS_KEY]: [...others, { cid, seq, at: this.deps.now(), state: 'posted' as const }].slice(-CID_CAP) } : {}),
     )
-    this.log(`say posted seq=${item.seq} len=${item.text.length}${cid ? ' cid' : ''}`)
-    this.broadcast({ t: 'posted', seq: item.seq, text: item.text, ...(cid ? { cid } : {}) })
-    await this.notifyKid(next, posted, item)
+    this.log(`say posted seq=${item.seq} len=${item.text.length}${cid ? ' cid' : ''}${reconciled ? ' reconciled' : ''}`)
+    this.broadcast({ t: 'posted', seq: item.seq, text: item.text, ...(cid ? { cid } : {}), ...(reconciled ? { dup: true } : {}) })
+    await this.notifyKid({ ...next, id: session.id, threadTs }, posted, item)
     if (this.deps.fastLane.enabled) {
       const answer = await this.deps.fastLane.answer(item.text)
       if (answer) {
-        const fast = await this.history.append({ from: 'fast', text: cleanText(answer), slackTs: null, threadTs: next.threadTs, session: next.id, at: this.deps.now() })
+        const fast = await this.history.append({ from: 'fast', text: cleanText(answer), slackTs: null, threadTs, session: session.id, at: this.deps.now() })
         this.broadcast({ t: 'msg', ...this.toWire(fast) })
       }
     }
@@ -379,41 +432,58 @@ export class HubCore {
       const pairId = typeof body?.pairId === 'string' && PAIR_ID_RE.test(body.pairId) ? body.pairId : null
       if (!pairId) return { status: 400, body: { error: 'bad-request' } }
       const r = await pairing.poll(pairId, client)
-      if (r.status === 'paired') this.log(`pair paired id=${r.deviceId}`)
+      if (r.status === 'paired') {
+        const closed = this.closeDevices(new Set(r.evicted), 'evicted')
+        this.log(`pair paired id=${r.deviceId} evicted=${r.evicted.length} sockets=${closed}`)
+        return { status: 200, body: { status: 'paired', token: r.token, deviceId: r.deviceId } }
+      }
       return { status: r.status === 'rate-limited' ? 429 : 200, body: r }
     }
     if (path === '/pair-confirm' || path === '/pair-revoke') {
       const user = typeof body?.user === 'string' ? body.user : ''
+      const eventId = typeof body?.eventId === 'string' ? body.eventId : ''
+      const atMs = typeof body?.atMs === 'number' && Number.isFinite(body.atMs) ? body.atMs : NaN
+      if (!eventId || !Number.isFinite(atMs)) return { status: 200, body: { ok: false } }
       const fox = await this.deps.slack.selfUserId()
       if (!fox || user !== fox) {
         this.log(`pair command rejected reason=${fox ? 'not-fox' : 'self-unknown'}`)
         return { status: 200, body: { ok: false } }
       }
       if (path === '/pair-revoke') {
-        const n = await pairing.revokeAll()
-        let closed = 0
-        for (const ws of this.deps.sockets()) {
-          try {
-            const a = ws.deserializeAttachment() as DeviceAttachment | null
-            if (a?.deviceId) {
-              ws.serializeAttachment({ ...a, authed: false })
-              ws.close(CLOSE_UNAUTHORIZED, 'revoked')
-              closed++
-            }
-          } catch {
-            continue
-          }
+        const r = await pairing.revokeAll({ eventId, atMs })
+        if (!r.ok) {
+          this.log(`pair revoke skipped reason=${r.reason}`)
+          return { status: 200, body: r }
         }
-        this.log(`pair revoke devices=${n} sockets=${closed}`)
-        return { status: 200, body: { ok: true, revoked: n } }
+        const closed = this.closeDevices(new Set(r.revoked), 'revoked')
+        this.log(`pair revoke devices=${r.revoked.length} sockets=${closed}`)
+        return { status: 200, body: { ok: true, revoked: r.revoked.length } }
       }
       const code = typeof body?.code === 'string' && PAIR_CODE_RE.test(body.code) ? body.code : null
       if (!code) return { status: 200, body: { ok: false } }
-      const r = await pairing.confirm(code)
+      const r = await pairing.confirm(code, { eventId, atMs })
       this.log(`pair confirm ${r.ok ? 'ok' : `rejected reason=${r.reason}`}`)
       return { status: 200, body: r }
     }
     return null
+  }
+
+  private closeDevices(ids: Set<string>, reason: string): number {
+    if (!ids.size) return 0
+    let closed = 0
+    for (const ws of this.deps.sockets()) {
+      try {
+        const a = ws.deserializeAttachment() as DeviceAttachment | null
+        if (a?.deviceId && ids.has(a.deviceId)) {
+          ws.serializeAttachment({ ...a, authed: false })
+          ws.close(CLOSE_UNAUTHORIZED, reason)
+          closed++
+        }
+      } catch {
+        continue
+      }
+    }
+    return closed
   }
 
   get recording(): boolean {
@@ -469,6 +539,20 @@ export class HubCore {
     else if (t.pending.length < PENDING_AUDIO_CAP) t.pending.push(frame)
   }
 
+  cancelAsr(reason: string): void {
+    const t = this.turn
+    if (!t || t.finished || t.stopRequested) return
+    t.cancelled = true
+    t.stopRequested = true
+    this.log(`asr cancel (${reason})`)
+    this.finishAsr(t, false)
+    try {
+      t.socket?.close(1000, 'cancelled')
+    } catch {
+      return
+    }
+  }
+
   stopAsr(reason: string): void {
     const t = this.turn
     if (!t || t.finished || t.stopRequested) return
@@ -492,6 +576,10 @@ export class HubCore {
     t.finished = true
     if (this.turn === t) this.turn = null
     const text = t.assembler.finalText()
+    if (t.cancelled) {
+      t.resolve(null)
+      return
+    }
     if (!completed) {
       this.log('asr interrupted')
       this.broadcast({ t: 'error', code: 'asr-interrupted', message: 'transcription ended early; nothing was sent', ...(t.cid ? { cid: t.cid } : {}) })

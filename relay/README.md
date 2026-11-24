@@ -165,6 +165,7 @@ Each route fails closed when its secret is missing:
 | `{"t":"say","text":"…","cid":"…"}` | Post text to Kid. `cid` (8–64 of `A-Za-z0-9_-`, e.g. a UUID) is optional. A repeated `cid` is not posted again: the relay re-acks with `posted {seq, cid, dup: true}` |
 | `{"t":"audio.start","cid":"…"}` | Start a speech turn. The transcript is posted with this `cid` |
 | binary frames | PCM 16 kHz s16le mono, about 3200 B per 100 ms |
+| `{"t":"audio.cancel"}` | Abandon the turn: nothing is posted. The relay also cancels a turn whose last device disconnects before `audio.stop` |
 | `{"t":"audio.stop"}` | End the turn. Deepgram's final transcript is posted to Kid. If the stream fails or closes before the stop, the relay sends `error asr-interrupted` and posts nothing |
 | `{"t":"history","before":seq,"limit":n}` | Fetch older messages |
 | `{"t":"session.new"}` | Start a new Slack thread |
@@ -176,6 +177,7 @@ Each route fails closed when its secret is missing:
 |---|---|
 | `auth.ok` | Authentication accepted |
 | `hello` | Greeting, with `lastSeq` |
+| `replay.done` | `{upTo}`: the replay after `hello {lastSeq}` is complete. The plugin persists its cursor only after this frame, so live frames that arrive during the replay cannot make it skip a gap |
 | `msg` | A message: `from` = `kid` / `glasses` / `fast`, plus `session`, and `edited` on edits |
 | `asr.partial` / `asr.final` | Live and final transcript |
 | `posted` | The message reached Slack: `seq`, `text`, `cid` if one was given, `dup: true` for a re-ack |
@@ -186,7 +188,12 @@ Each route fails closed when its secret is missing:
 
 **Resend without double posting.** The plugin keeps every `say` it has not seen acknowledged in a persisted outbox. After each reconnect, and after a page reload, it sends them again with the same `cid`.
 
-- The relay keeps `meta:cids` (at most 300 entries, 24 h). It is written atomically with the history entry, and every post runs through one queue, so concurrent duplicates also post once.
+- The relay keeps `meta:cids` (at most 1000 entries, 24 h; the plugin drops unsent turns after 12 h). Every post runs through one queue, so concurrent duplicates also post once.
+- Before calling Slack, the relay marks the cid `sending`. The outcome then decides the next step:
+  - **Success:** the mark becomes `posted`, atomically with the history entry.
+  - **Definite refusal** (Slack answered `ok:false`, or a config error): the mark is removed, so a resend posts normally.
+  - **Uncertain** (network error, or the DO died mid-call): the mark stays. On the resend the relay first looks for its own message with the same text in that thread or the DM (`conversations.replies` / `conversations.history`, `im:history`). If it finds one, it records that post and calls the webhook; if not, it posts. If Slack cannot be checked, it posts nothing and reports `slack-unreachable`.
+- The plugin retries errors that are not permanent on the same socket, after 5 s, then 10 s, with the same cid. A turn is given up after 3 errors.
 - A duplicate is answered from history and never calls Slack or the Kid webhook.
 - `msg` / `history` items for glasses turns carry their `cid`, so a replay clears the outbox as well.
 - A voice turn cannot be resent: the audio is not kept. If the socket drops mid-turn, the relay reports `asr-interrupted` and posts nothing.
@@ -212,15 +219,19 @@ The device token never passes through a chat and is not in the public bundle. A 
    - It has no `subtype`, `bot_id`, `app_id`, `bot_profile` or `hidden`. The relay's own user-token posts carry `app_id` / `bot_profile`, so they can never confirm.
    - The sender is the installing user from `authorizations`, if present.
 4. The hub then requires `user == auth.test user id` (Fox).
-5. The code is compared in constant time and is single use. After 5 wrong codes within 10 min, confirmations are locked for 10 min and pending pairings are cleared.
-6. The plugin polls `POST /pair/poll {pairId}` (60 per minute per client). Once Fox has confirmed, the relay mints `kgd_<64 hex>` and returns it **once** as `{status: "paired", token, deviceId}`. It stores only the token's sha256, in `pair:devices` (at most 10 devices, oldest dropped).
+5. The code is compared in constant time and is single use.
+   - The message time must fall within that pairing's lifetime (allowing 60 s of skew).
+   - Each confirming message (`pair:<message ts>`) is processed once, so Slack redeliveries change nothing.
+   - After 5 wrong codes within 10 min, confirmations are locked for 10 min and pending pairings are cleared.
+   - Each client can hold at most 2 pending pairings.
+6. The plugin polls `POST /pair/poll {pairId}` (60 per minute per client). Once Fox has confirmed, the relay mints `kgd_<64 hex>` and returns it **once** as `{status: "paired", token, deviceId}`. It stores only the token's sha256, in `pair:devices` (at most 10 devices). When an 11th device pairs, the oldest is dropped and its open sockets are closed with 4401 `evicted`.
 7. The plugin keeps the token in the SDK's local storage (`bridge.setLocalStorage`).
 
 Device auth accepts `DEVICE_TOKEN` or a paired token. A rejected paired token (close 4401) makes the plugin forget it and pair again.
 
 **Revoking.**
 
-- Fox sends `撤销配对` in the same DM, with the same checks as above. All paired tokens are deleted and paired sockets are closed with 4401 `revoked`.
+- Fox sends `撤销配对` in the same DM, with the same checks as above. Every device paired before that message is deleted, and its sockets are closed with 4401 `revoked`. A redelivered or late revoke cannot remove devices paired after it.
 - Rotating `DEVICE_TOKEN` does **not** revoke paired tokens, and `撤销配对` does not affect `DEVICE_TOKEN`.
 - Fallback without Slack: delete the DO storage keys `pair:devices` and `pair:pending`. The other DO keys (history, session) are unaffected.
 

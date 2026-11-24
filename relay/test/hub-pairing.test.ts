@@ -120,7 +120,7 @@ describe('say dedupe by cid', () => {
 
 async function pairDevice(core: HubCore) {
   const s = (await core.pairRequest('/pair/start', null, 'c1'))!.body as { pairId: string; code: string }
-  await core.pairRequest('/pair-confirm', { user: FOX, code: s.code }, 'slack')
+  await core.pairRequest('/pair-confirm', { user: FOX, code: s.code, eventId: `e${Math.random()}`, atMs: 1_000_000 }, 'slack')
   const r = (await core.pairRequest('/pair/poll', { pairId: s.pairId }, 'c1'))!.body as { status: string; token: string; deviceId: string }
   return { ...s, ...r }
 }
@@ -149,11 +149,11 @@ describe('pairing through the hub', () => {
   it('only Fox (auth.test user) can confirm; an unknown self id rejects too', async () => {
     const { core } = setup()
     const s = (await core.pairRequest('/pair/start', null, 'c1'))!.body as { pairId: string; code: string }
-    expect((await core.pairRequest('/pair-confirm', { user: 'UKID0001', code: s.code }, 'slack'))!.body).toEqual({ ok: false })
+    expect((await core.pairRequest('/pair-confirm', { user: 'UKID0001', code: s.code, eventId: 'e1', atMs: 1_000_000 }, 'slack'))!.body).toEqual({ ok: false })
     expect((await core.pairRequest('/pair/poll', { pairId: s.pairId }, 'c1'))!.body).toMatchObject({ status: 'pending' })
     const other = setup({ slack: { selfUserId: async () => null, postToKid: async () => ({ ts: '1', channel: 'D1' }) } })
     const s2 = (await other.core.pairRequest('/pair/start', null, 'c1'))!.body as { code: string }
-    expect((await other.core.pairRequest('/pair-confirm', { user: FOX, code: s2.code }, 'slack'))!.body).toEqual({ ok: false })
+    expect((await other.core.pairRequest('/pair-confirm', { user: FOX, code: s2.code, eventId: 'e2', atMs: 1_000_000 }, 'slack'))!.body).toEqual({ ok: false })
   })
 
   it('poll validates the pairId shape', async () => {
@@ -170,7 +170,7 @@ describe('pairing through the hub', () => {
     devices.push(paired, shared)
     await core.onDeviceMessage(paired, JSON.stringify({ t: 'auth', token: r.token }))
     await core.onDeviceMessage(shared, JSON.stringify({ t: 'auth', token: SHARED }))
-    expect((await core.pairRequest('/pair-revoke', { user: FOX }, 'slack'))!.body).toEqual({ ok: true, revoked: 1 })
+    expect((await core.pairRequest('/pair-revoke', { user: FOX, eventId: 'rv1', atMs: 1_000_000 }, 'slack'))!.body).toEqual({ ok: true, revoked: 1 })
     expect(paired.closed).toEqual({ code: 4401, reason: 'revoked' })
     expect(shared.closed).toBeNull()
     const again = new FakeDevice(false)
@@ -182,5 +182,153 @@ describe('pairing through the hub', () => {
     const { core } = setup()
     for (let i = 0; i < 3; i++) expect((await core.pairRequest('/pair/start', null, 'same'))!.status).toBe(200)
     expect(await core.pairRequest('/pair/start', null, 'same')).toEqual({ status: 429, body: { error: 'rate-limited' } })
+  })
+})
+
+describe('review fixes: uncertain Slack posts, evicted devices, cancel, replay marker', () => {
+  function flaky(outcomes: Array<'ok' | 'network' | 'api'>, onSlack: string[] = []) {
+    let i = 0
+    let n = 0
+    const found: Array<{ text: string }> = []
+    const hooks: string[] = []
+    const ctx = setup({
+      slack: {
+        selfUserId: async () => FOX,
+        postToKid: async (text: string) => {
+          const o = outcomes[Math.min(i++, outcomes.length - 1)]
+          if (o === 'api') throw new SlackApiError('ratelimited')
+          onSlack.push(text)
+          found.push({ text })
+          if (o === 'network') throw new TypeError('connection reset')
+          return { ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }
+        },
+        findOwnPost: async (text: string) => (found.some(f => f.text === text) ? { ts: '1700000000.999', channel: 'D0123ABCDEF' } : null),
+      },
+      kidWebhook: { notify: async () => (hooks.push('call'), { ok: true, status: 200, attempts: 1 }) },
+    })
+    return { ...ctx, onSlack, hooks }
+  }
+
+  it('F01: when Slack took the post but the response was lost, the resend reconciles instead of posting again', async () => {
+    const onSlack: string[] = []
+    const { core, device, hooks } = flaky(['network', 'ok'], onSlack)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '只发一次', cid: CID }))
+    expect(device.of('error')).toEqual([expect.objectContaining({ code: 'slack-unreachable', cid: CID })])
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '只发一次', cid: CID }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '只发一次', cid: CID }))
+    expect(onSlack).toHaveLength(1)
+    expect(hooks).toHaveLength(1)
+    expect(device.of('posted')).toEqual([
+      { t: 'posted', seq: 1, text: '只发一次', cid: CID, dup: true },
+      { t: 'posted', seq: 1, text: '只发一次', cid: CID, dup: true },
+    ])
+  })
+
+  it('F01: a definite Slack refusal (ok:false) clears the mark so the resend posts normally', async () => {
+    const onSlack: string[] = []
+    const { core, device } = flaky(['api', 'ok'], onSlack)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'x', cid: CID }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'x', cid: CID }))
+    expect(onSlack).toHaveLength(1)
+    expect(device.of('posted')).toEqual([{ t: 'posted', seq: 1, text: 'x', cid: CID }])
+  })
+
+  it('F01: if the earlier attempt never reached Slack, the resend posts once', async () => {
+    const posts: string[] = []
+    let first = true
+    const { core, device } = setup({
+      slack: {
+        selfUserId: async () => FOX,
+        postToKid: async (text: string) => {
+          if (first) {
+            first = false
+            throw new TypeError('dns')
+          }
+          posts.push(text)
+          return { ts: '1700000000.001', channel: 'D0123ABCDEF' }
+        },
+        findOwnPost: async () => null,
+      },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'y', cid: CID }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'y', cid: CID }))
+    expect(posts).toHaveLength(1)
+  })
+
+  it('F01: if Slack cannot be checked, nothing is posted and the client keeps the turn', async () => {
+    const posts: string[] = []
+    let calls = 0
+    const { core, device } = setup({
+      slack: {
+        selfUserId: async () => FOX,
+        postToKid: async (text: string) => {
+          calls++
+          if (calls === 1) throw new TypeError('timeout')
+          posts.push(text)
+          return { ts: '1', channel: 'D0123ABCDEF' }
+        },
+        findOwnPost: async () => {
+          throw new TypeError('still down')
+        },
+      },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'z', cid: CID }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'z', cid: CID }))
+    expect(posts).toEqual([])
+    expect(device.of('error').map(e => e.code)).toEqual(['slack-unreachable', 'slack-unreachable'])
+  })
+
+  it('F03: pairing an 11th device closes the evicted device socket', async () => {
+    const { core, devices, advance } = setup()
+    const first = await pairDevice(core)
+    const ws = new FakeDevice(false)
+    devices.push(ws)
+    await core.onDeviceMessage(ws, JSON.stringify({ t: 'auth', token: first.token }))
+    for (let i = 0; i < 10; i++) {
+      advance(61_000)
+      const s = (await core.pairRequest('/pair/start', null, `c${i}`))!.body as { pairId: string; code: string }
+      await core.pairRequest('/pair-confirm', { user: FOX, code: s.code, eventId: `x${i}`, atMs: 1_000_000 + 61_000 * (i + 1) }, 'slack')
+      await core.pairRequest('/pair/poll', { pairId: s.pairId }, `c${i}`)
+    }
+    expect(ws.closed).toEqual({ code: 4401, reason: 'evicted' })
+    expect(ws.deserializeAttachment()).toMatchObject({ authed: false })
+  })
+
+  it('F08: audio.cancel and a dropped connection before stop discard the turn without posting', async () => {
+    const { core, device, asr, posts } = setup()
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    asr.result('说了一半', true)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.cancel' }))
+    asr.close(1000)
+    await core.turnsSettled
+    expect(posts).toEqual([])
+    expect(device.of('error')).toEqual([])
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: 'cid-second-1' }))
+    asr.result('又说了一半', true)
+    core.cancelAsr('no-devices')
+    await core.turnsSettled
+    expect(posts).toEqual([])
+  })
+
+  it('F08: after audio.stop a dropped connection does not cancel; the transcript is still posted', async () => {
+    const { core, device, asr, posts } = setup()
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    asr.result('完整的一句', true)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    core.cancelAsr('no-devices')
+    asr.close(1000)
+    await core.turnsSettled
+    await flush()
+    expect(posts).toHaveLength(1)
+  })
+
+  it('F06: hello with lastSeq ends the replay with replay.done {upTo}', async () => {
+    const { core, device } = setup()
+    await core.sayFromGlasses('a', 'cid-aaaaaaaa')
+    const late = new FakeDevice()
+    await core.onDeviceMessage(late, JSON.stringify({ t: 'hello', lastSeq: 0 }))
+    expect(late.sent.map(m => m.t)).toEqual(['hello', 'msg', 'replay.done'])
+    expect(late.of('replay.done')).toEqual([{ t: 'replay.done', upTo: 1 }])
+    expect(device.of('posted')).toHaveLength(1)
   })
 })

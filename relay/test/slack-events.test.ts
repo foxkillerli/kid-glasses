@@ -123,9 +123,9 @@ describe('routeSlackEvent: pairing commands', () => {
   const fox = (text: string, extra: Record<string, unknown> = {}) => env({ user: FOX, text, ts: '1.1', ...extra })
 
   it('routes a plain message from Fox "配对 123456" as pair-confirm', () => {
-    expect(routeSlackEvent(fox('配对 123456'), KID)).toEqual({ kind: 'pair-confirm', code: '123456', user: FOX, eventId: 'Ev1' })
+    expect(routeSlackEvent(fox('配对 123456'), KID)).toEqual({ kind: 'pair-confirm', code: '123456', user: FOX, eventId: 'pair:1.1', atMs: 1100 })
     expect(routeSlackEvent(fox(' 配对123456 '), KID)).toMatchObject({ kind: 'pair-confirm', code: '123456' })
-    expect(routeSlackEvent(fox('撤销配对'), KID)).toEqual({ kind: 'pair-revoke', user: FOX, eventId: 'Ev1' })
+    expect(routeSlackEvent(fox('撤销配对'), KID)).toEqual({ kind: 'pair-revoke', user: FOX, eventId: 'pair:1.1', atMs: 1100 })
   })
 
   it('rejects app-marked or subtyped messages, so the relay\'s own user-token posts can never confirm', () => {

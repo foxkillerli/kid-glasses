@@ -22,8 +22,8 @@ export interface KidAllowlist {
 export type SlackRoute =
   | { kind: 'challenge'; challenge: string }
   | { kind: 'kid-message'; message: KidMessage }
-  | { kind: 'pair-confirm'; code: string; user: string; eventId: string }
-  | { kind: 'pair-revoke'; user: string; eventId: string }
+  | { kind: 'pair-confirm'; code: string; user: string; eventId: string; atMs: number }
+  | { kind: 'pair-revoke'; user: string; eventId: string; atMs: number }
   | { kind: 'ignore'; reason: string }
 
 const PLAIN_SUBTYPES = new Set([undefined, 'bot_message', 'thread_broadcast', 'me_message'])
@@ -77,8 +77,11 @@ function pairCommand(b: Obj, e: Obj): SlackRoute | null {
   if (!user) return { kind: 'ignore', reason: 'pair-no-user' }
   const installers = installerUserIds(b)
   if (installers.size > 0 && !installers.has(user)) return { kind: 'ignore', reason: 'pair-not-installer' }
-  const eventId = str(b.event_id) ?? `pair:${str(e.ts) ?? ''}`
-  return confirm ? { kind: 'pair-confirm', code: confirm[1], user, eventId } : { kind: 'pair-revoke', user, eventId }
+  const ts = str(e.ts)
+  const atMs = ts ? Math.round(Number(ts) * 1000) : NaN
+  if (!ts || !Number.isFinite(atMs)) return { kind: 'ignore', reason: 'pair-no-ts' }
+  const eventId = `pair:${ts}`
+  return confirm ? { kind: 'pair-confirm', code: confirm[1], user, eventId, atMs } : { kind: 'pair-revoke', user, eventId, atMs }
 }
 
 export function startsWithGlassesPrefix(text: string): boolean {

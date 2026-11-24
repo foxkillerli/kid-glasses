@@ -121,7 +121,7 @@ export class RelayHub implements DurableObject {
 
   private stopAsrIfNoDevices(closing: WebSocket): void {
     const open = this.state.getWebSockets().filter(w => w !== closing && w.readyState === OPEN && isAuthed(w))
-    if (open.length === 0) this.core.stopAsr('no-devices')
+    if (open.length === 0) this.core.cancelAsr('no-devices')
   }
 
   async webSocketClose(ws: WebSocket, code: number, reason: string): Promise<void> {
