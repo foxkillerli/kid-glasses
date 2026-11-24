@@ -48,11 +48,24 @@ export class PairingClient {
     this.deps.onView(this.viewValue)
   }
 
-  private async post(path: string, body: string): Promise<Response> {
+  private async post(path: string, body: string): Promise<{ status: number; ok: boolean; body: unknown }> {
     const ctrl = new AbortController()
-    const timer = this.deps.timers.setTimeout(() => ctrl.abort(), this.deps.timeoutMs ?? 10_000)
+    let timer: unknown = null
+    const timeout = new Promise<never>((_, reject) => {
+      timer = this.deps.timers.setTimeout(() => {
+        ctrl.abort()
+        reject(new Error('timeout'))
+      }, this.deps.timeoutMs ?? 10_000)
+    })
     try {
-      return await this.deps.fetch(`${this.deps.origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body, signal: ctrl.signal })
+      return await Promise.race([
+        (async () => {
+          const res = await this.deps.fetch(`${this.deps.origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body, signal: ctrl.signal })
+          const parsed = await res.json().catch(() => null)
+          return { status: res.status, ok: res.ok, body: parsed }
+        })(),
+        timeout,
+      ])
     } finally {
       this.deps.timers.clearTimeout(timer)
     }
@@ -96,7 +109,7 @@ export class PairingClient {
 
   private async fresh(): Promise<void> {
     this.set({ phase: 'starting', code: null, expiresAt: 0, detail: '' })
-    let res: Response
+    let res: { status: number; ok: boolean; body: unknown }
     try {
       res = await this.post('/pair/start', '')
     } catch {
@@ -111,7 +124,7 @@ export class PairingClient {
       this.set({ phase: 'error', detail: `relay ${res.status}` })
       return
     }
-    const body = (await res.json().catch(() => null)) as Pending | null
+    const body = res.body as Pending | null
     if (!body || typeof body.pairId !== 'string' || typeof body.code !== 'string') {
       this.set({ phase: 'error', detail: 'relay 回复格式不对' })
       return
@@ -134,14 +147,14 @@ export class PairingClient {
     const p = this.pending
     if (!p) return
     if (p.expiresAt <= this.deps.now()) return this.expire()
-    let res: Response
+    let res: { status: number; ok: boolean; body: unknown }
     try {
       res = await this.post('/pair/poll', JSON.stringify({ pairId: p.pairId }))
     } catch {
       this.set({ detail: '网络不通，正在重试' })
       return this.schedule(this.deps.pollMs * 2)
     }
-    const body = (await res.json().catch(() => null)) as { status?: string; token?: string } | null
+    const body = res.body as { status?: string; token?: string } | null
     if (res.status === 429 || body?.status === 'rate-limited') return this.schedule(this.deps.pollMs * 4)
     if (body?.status === 'paired' && typeof body.token === 'string') {
       this.pending = null

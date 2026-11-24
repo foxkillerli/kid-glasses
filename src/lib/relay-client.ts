@@ -434,7 +434,7 @@ export class RelayClient {
       return
     }
     void this.persistOutbox()
-    const delay = this.t.retryBaseMs * 2 ** (e.tries - 1)
+    const delay = Math.min(this.t.retryBaseMs * 3 ** (e.tries - 1), 5 * 60_000)
     const old = this.retryTimers.get(cid)
     if (old !== undefined) this.deps.timers.clearTimeout(old)
     this.retryTimers.set(
@@ -457,8 +457,9 @@ export class RelayClient {
     const clean = text.trim()
     if (!clean || this.outbox.length >= this.t.outboxMax) return null
     const entry: OutboxEntry = { cid: this.deps.uuid(), text: clean, at: this.deps.now(), tries: 0 }
+    await this.deps.store.set(STORE_KEYS.outbox, JSON.stringify([...this.outbox, entry])).catch(() => this.log('relay outbox save failed'))
     this.outbox = [...this.outbox, entry]
-    await this.persistOutbox()
+    this.deps.events.outbox?.(this.pending)
     if (this.stateValue === 'online') this.sendJson({ t: 'say', text: entry.text, cid: entry.cid })
     return entry.cid
   }

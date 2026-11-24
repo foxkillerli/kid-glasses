@@ -188,6 +188,7 @@ const ERROR_TEXT: Record<string, string> = {
   SlackConfigError: 'relay 的 Slack 配置有问题',
   ChannelNotAllowedError: 'relay 的频道配置有问题',
   'empty-text': '内容是空的，没发',
+  'asr-busy': '另一副眼镜正在说话',
 }
 
 const STATE_TEXT: Record<RelayState, string> = {

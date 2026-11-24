@@ -9,11 +9,11 @@ export const RELAY_TIMING = {
   backoffMaxMs: 30_000,
   outboxTtlMs: 12 * 60 * 60 * 1000,
   outboxMax: 20,
-  maxSendTries: 3,
+  maxSendTries: 4,
   pairPollMs: 2_500,
   connectTimeoutMs: 10_000,
   probeMs: 5_000,
-  retryBaseMs: 5_000,
+  retryBaseMs: 10_000,
   httpTimeoutMs: 10_000,
 } as const
 

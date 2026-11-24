@@ -97,3 +97,34 @@ describe('PairingClient', () => {
     expect(calls.filter(c => c.url.endsWith('/pair/start'))).toHaveLength(2)
   })
 })
+
+describe('PairingClient round 2', () => {
+  it('F04: a response whose body never arrives times out and polling continues', async () => {
+    const timers = new FakeTimers()
+    const views: PairView[] = []
+    let n = 0
+    const client = new PairingClient({
+      origin: 'https://relay.test',
+      fetch: async () => {
+        n++
+        if (n === 1) return Response.json({ pairId: PAIR_ID, code: '555555', expiresAt: 1_300_000 })
+        return { status: 200, ok: true, json: () => new Promise(() => {}) } as unknown as Response
+      },
+      store: new MemoryStore(),
+      now: () => timers.now,
+      pollMs: 2500,
+      timeoutMs: 10_000,
+      timers,
+      onView: v => views.push({ ...v }),
+      onToken: async () => {},
+    })
+    await client.begin()
+    timers.advance(2500)
+    await tick()
+    timers.advance(10_000)
+    for (let i = 0; i < 5; i++) await tick()
+    expect(views.at(-1)?.detail).toBe('网络不通，正在重试')
+    expect(timers.pendingDelays()).toEqual([5000])
+  })
+})
+

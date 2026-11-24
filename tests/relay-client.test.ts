@@ -189,21 +189,21 @@ describe('RelayClient outbox: unacknowledged says are resent with the same cid',
     expect(client.pending).toEqual([])
   })
 
-  it('errors for a cid count as tries; after 3 the turn is dropped', async () => {
+  it('errors for a cid count as tries; after 4 the turn is dropped', async () => {
     const { client, last, online, timers, errors } = setup()
     await client.init()
     client.start()
     const cid = (await client.say('a')) as string
-    for (let i = 0; i < 3; i++) {
+    for (let i = 0; i < 4; i++) {
       await online()
       last().frame({ t: 'error', code: 'SlackApiError', message: 'x', cid })
-      if (i < 2) {
+      if (i < 3) {
         last().drop()
         timers.advance(timers.pendingDelays()[0])
       }
     }
     expect(client.pending).toEqual([])
-    expect(errors).toEqual([`SlackApiError:${cid}`, `SlackApiError:${cid}`, `SlackApiError:${cid}`])
+    expect(errors).toEqual(Array(4).fill(`SlackApiError:${cid}`))
   })
 })
 
@@ -277,7 +277,9 @@ describe('RelayClient review fixes', () => {
     await online()
     const cid = await client.say('retry me')
     last().frame({ t: 'error', code: 'slack-unreachable', message: 'x', cid })
-    timers.advance(5_000)
+    timers.advance(9_000)
+    expect(last().json().filter(m => m.t === 'say')).toHaveLength(1)
+    timers.advance(1_000)
     expect(last().json().filter(m => m.t === 'say')).toEqual([
       { t: 'say', text: 'retry me', cid },
       { t: 'say', text: 'retry me', cid },
@@ -305,6 +307,19 @@ describe('RelayClient review fixes', () => {
     client.audioStart()
     client.audioCancel()
     expect(last().types().slice(-2)).toEqual(['audio.start', 'audio.cancel'])
+  })
+})
+
+describe('RelayClient round 2', () => {
+  it('F07-A: a say queued while a reconnect flushes is sent once per connection, not twice', async () => {
+    const { client, last, online } = setup()
+    await client.init()
+    client.start()
+    const pending = client.say('race')
+    await online()
+    const cid = await pending
+    const says = last().json().filter(m => m.t === 'say')
+    expect(says).toEqual([{ t: 'say', text: 'race', cid }])
   })
 })
 
