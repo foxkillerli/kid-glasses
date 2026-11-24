@@ -1,0 +1,15 @@
+{
+  "name": "kid-glasses-relay",
+  "main": "src/index.ts",
+  "compatibility_date": "2026-11-01",
+  "workers_dev": true,
+  "durable_objects": {
+    "bindings": [{ "name": "HUB", "class_name": "RelayHub" }]
+  },
+  "migrations": [{ "tag": "v1", "new_sqlite_classes": ["RelayHub"] }],
+  "vars": {
+    "DEEPGRAM_MODEL": "nova-3",
+    "DEEPGRAM_LANGUAGE": "multi",
+    "FAST_LANE_ENABLED": "false"
+  }
+}
