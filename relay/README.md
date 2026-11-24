@@ -33,7 +33,11 @@ There was no `wrangler login`; the deploy went through the Cloudflare MCP:
    - `migrations: {new_tag: "v1", new_sqlite_classes: ["RelayHub"]}`
 4. Enable the workers.dev route: `POST …/subdomain {enabled: true}`.
 
-On a redeploy, do **not** resend the `v1` migration. Send migrations only when the classes change. Redeploying the script does not touch secrets Fox has set.
+On a redeploy:
+
+- Do **not** resend the `v1` migration. Send migrations only when the classes change.
+- Add `"keep_bindings": ["secret_text"]` to the metadata so the secrets Fox has set survive the script upload. This is not yet verified on this Worker; check `/health` straight after the redeploy.
+- Never list or print secret values.
 
 ## Layout
 
