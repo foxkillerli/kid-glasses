@@ -17,6 +17,7 @@ import { PcmAccumulator, clipStats, formatDb, levelBar, toDbfs, bytesToSeconds, 
 import { newHeartbeat, tick, expectedTicks, lostTicks, formatDuration, hhmm, hhmmss, type HeartbeatState } from './lib/heartbeat'
 import { WsProbe } from './lib/ws-probe'
 import { paginateLines } from './lib/paginate'
+import { LENS_TEXT } from './lib/lens-text'
 import { SCREEN_W, SCREEN_H } from './lib/limits'
 import {
   COMMON_HANZI,
@@ -42,8 +43,8 @@ const HEARTBEAT_MS = 1000
 export const MIC_SOURCE = AudioInputSource.Glasses
 const NO_AUDIO_MS = 3000
 const WS_PING_MS = 5000
-const BODY_MAX_LINES = 7
-const PAGE_MAX_BYTES = 900
+const BODY_MAX_LINES = LENS_TEXT.bodyLines
+const PAGE_MAX_BYTES = LENS_TEXT.pageMaxBytes
 
 export const ID = { cap: 1, status: 2, body: 3, hint: 4, full: 5 } as const
 const STATUS_H = 32
