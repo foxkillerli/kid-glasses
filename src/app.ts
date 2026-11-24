@@ -17,7 +17,7 @@ import { newHeartbeat, tick, expectedTicks, lostTicks, formatDuration, hhmm, hhm
 import { WsProbe } from './lib/ws-probe'
 import { paginateLines } from './lib/paginate'
 import { LENS_TEXT } from './lib/lens-text'
-import { MIC_SOURCE, closeGlassesMic, openGlassesMic } from './lib/mic-control'
+import { checkFrameSource, closeGlassesMic, openGlassesMic } from './lib/mic-control'
 import { SCREEN_W, SCREEN_H } from './lib/limits'
 import {
   COMMON_HANZI,
@@ -131,6 +131,8 @@ interface MicState {
   lastRole: string
   lastRaw: string
   alerted: boolean
+  dropped: number
+  lastDropReason: string
 }
 
 interface DeviceView {
@@ -185,6 +187,8 @@ export class App {
     lastRole: '-',
     lastRaw: '-',
     alerted: false,
+    dropped: 0,
+    lastDropReason: '',
   }
   private device: DeviceView = { conn: '?', wear: '?', bat: '?' }
   private created = false
@@ -453,6 +457,7 @@ export class App {
       lines.push(`audioControl ${m.lastControl}`)
       lines.push(devLine)
       lines.push(`host: ${m.lastRaw}`.slice(0, 46))
+      if (m.dropped) lines.push(`!! dropped ${m.dropped} non-glasses (${m.lastDropReason})`.slice(0, 46))
     } else {
       lines.push(`○ idle  src: glasses (only)`)
       lines.push(`audioControl ${m.lastControl}`)
@@ -463,6 +468,7 @@ export class App {
         lines.push(c.frames === 0 ? '!! last clip got NO AUDIO FRAMES' : `rms ${formatDb(c.rmsDb)}dB peak ${formatDb(c.peakDb)}dB`)
         if (m.lastSrc) lines.push(`ev src ${srcSummary(m.lastSrc)} dir ${m.lastDir}`)
         lines.push(`host: ${m.lastRaw}`.slice(0, 46))
+        if (m.dropped) lines.push(`!! dropped ${m.dropped} non-glasses (${m.lastDropReason})`.slice(0, 46))
       } else {
         lines.push('last clip: none')
         if (m.framesWhileIdle > 0) lines.push(`idle frames: ${m.framesWhileIdle}`)
@@ -550,6 +556,13 @@ export class App {
     const pcm = a.audioPcm
     if (!pcm) return
     if (m.recording && m.acc) {
+      const verdict = checkFrameSource(a.source, raw)
+      if (!verdict.accept) {
+        m.dropped++
+        m.lastDropReason = verdict.reason
+        if (m.dropped === 1) this.note(`!! dropped non-glasses audio frame (${verdict.reason}) host: ${rawAudioMeta(raw)}`)
+        return
+      }
       const first = m.acc.frames === 0
       m.acc.push(pcm)
       m.lastFrameAt = Date.now()
@@ -561,7 +574,6 @@ export class App {
       if (first) {
         this.note(`first audio frame ${pcm.length}B after ${m.lastFrameAt - m.startedAt}ms src=${a.source} dir=${m.lastDir} role=${m.lastRole} host: ${m.lastRaw}`)
       }
-      if (a.source !== MIC_SOURCE && m.src.phone + m.src.other === 1) this.note(`!! unexpected audio frame source=${String(a.source)}`)
     } else {
       m.framesWhileIdle++
     }
@@ -654,6 +666,8 @@ export class App {
     m.lastRole = '-'
     m.lastRaw = '-'
     m.alerted = false
+    m.dropped = 0
+    m.lastDropReason = ''
     m.lastControl = 'open -> pending'
     this.render()
     let r: unknown
@@ -663,7 +677,7 @@ export class App {
       r = `throw ${String(err).slice(0, 40)}`
     }
     m.lastControl = `open -> ${String(r)}`
-    this.note(`rec start ${mode} src=${MIC_SOURCE} audioControl -> ${String(r)} ${this.device.conn} wear=${this.device.wear}`)
+    this.note(`rec start ${mode} src=glasses audioControl -> ${String(r)} ${this.device.conn} wear=${this.device.wear}`)
     this.render()
   }
 
@@ -683,7 +697,7 @@ export class App {
       m.lastSrc = { ...m.src }
       const c = m.last
       this.note(
-        `rec stop ${reason} ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr wall ${((Date.now() - m.startedAt) / 1000).toFixed(2)}s rms ${formatDb(c.rmsDb)} peak ${formatDb(c.peakDb)} ev-src ${srcSummary(m.src)} dir ${m.lastDir} role ${m.lastRole} host: ${m.lastRaw}`,
+        `rec stop ${reason} ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr wall ${((Date.now() - m.startedAt) / 1000).toFixed(2)}s rms ${formatDb(c.rmsDb)} peak ${formatDb(c.peakDb)} ev-src ${srcSummary(m.src)} dir ${m.lastDir} role ${m.lastRole} host: ${m.lastRaw} dropped ${m.dropped}`,
       )
     }
     this.render()

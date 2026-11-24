@@ -13,3 +13,23 @@ export function openGlassesMic(bridge: MicBridge): Promise<boolean> {
 export function closeGlassesMic(bridge: MicBridge): Promise<boolean> {
   return bridge.audioControl(false, MIC_SOURCE)
 }
+
+const HOST_SOURCE_KEYS = ['source', 'audioSource', 'audio_source', 'inputSource', 'input_source']
+
+export type FrameVerdict =
+  | { accept: true; hostLabel: 'glasses' | 'absent' }
+  | { accept: false; reason: string }
+
+export function checkFrameSource(normalizedSource: unknown, raw: unknown): FrameVerdict {
+  if (raw && typeof raw === 'object') {
+    const r = raw as Record<string, unknown>
+    for (const k of HOST_SOURCE_KEYS) {
+      if (!(k in r)) continue
+      const v = r[k]
+      if (v === MIC_SOURCE) return normalizedSource === MIC_SOURCE ? { accept: true, hostLabel: 'glasses' } : { accept: false, reason: `sdk-source:${String(normalizedSource)}` }
+      return { accept: false, reason: `host-${k}:${String(v)}` }
+    }
+  }
+  if (normalizedSource !== MIC_SOURCE) return { accept: false, reason: `sdk-source:${String(normalizedSource)}` }
+  return { accept: true, hostLabel: 'absent' }
+}
