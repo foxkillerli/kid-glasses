@@ -30,7 +30,7 @@ export interface HubDeps {
   slack: {
     postToKid(text: string, threadTs: string | null): Promise<PostResult>
     selfUserId(): Promise<string | null>
-    findOwnPost?(text: string, threadTs: string | null, sinceMs: number): Promise<PostResult | null>
+    findOwnPost?(text: string, threadTs: string | null, sinceMs: number, excludeTs?: Set<string>): Promise<PostResult | null>
   }
   asr: { connect(): Promise<AsrSocket> } | null
   fastLane: FastLane
@@ -68,6 +68,7 @@ interface AsrTurn {
   stopRequested: boolean
   finished: boolean
   cid: string | undefined
+  owner: DeviceSocket | null
   cancelled?: boolean
   resolve: (text: string | null) => void
 }
@@ -78,6 +79,8 @@ interface CidEntry {
   at: number
   state: 'sending' | 'uncertain' | 'posted'
   threadTs?: string | null
+  session?: string
+  slackTs?: string
 }
 
 export interface DeviceAttachment extends SocketAttachment {
@@ -172,7 +175,7 @@ export class HubCore {
       return
     }
     if (typeof data !== 'string') {
-      this.onAudioFrame(data)
+      if (!this.turn || this.turn.owner === null || this.turn.owner === ws) this.onAudioFrame(data)
       return
     }
     const parsed = parseClientMessage(data)
@@ -205,9 +208,11 @@ export class HubCore {
         await this.startAsr(ws, m.cid)
         return
       case 'audio.stop':
+        if (this.turn && this.turn.owner !== null && this.turn.owner !== ws) return
         this.stopAsr('device')
         return
       case 'audio.cancel':
+        if (this.turn && this.turn.owner !== null && this.turn.owner !== ws) return
         this.cancelAsr('device')
         return
       case 'history': {
@@ -278,7 +283,8 @@ export class HubCore {
       let found: PostResult | null = null
       try {
         if (!find) throw new Error('no reconcile')
-        found = await find.call(this.deps.slack, slackText, known.threadTs ?? null, known.at)
+        const taken = new Set(others.map(c => c.slackTs).filter((t): t is string => !!t))
+        found = await find.call(this.deps.slack, slackText, known.threadTs ?? null, known.at, taken)
       } catch (err) {
         this.log(`say reconcile failed ${errorName(err)}`)
         this.broadcast({ t: 'error', code: 'slack-unreachable', message: 'could not check whether the last attempt reached Slack', cid })
@@ -286,10 +292,11 @@ export class HubCore {
       }
       if (found) {
         this.log('say reconciled: earlier attempt had reached Slack')
-        return this.recordPosted(raw, cid, others, session, known.threadTs ?? null, found, true)
+        const origin: Session = known.session && known.session !== session.id ? { id: known.session, threadTs: known.threadTs ?? null, startedAt: known.at, lastAt: known.at } : session
+        return this.recordPosted(raw, cid, others, origin, known.threadTs ?? null, found, true)
       }
     }
-    if (cid) await this.putCids([...others, { cid, state: 'sending', at: this.deps.now(), threadTs: session.threadTs }])
+    if (cid) await this.putCids([...others, { cid, state: 'sending', at: this.deps.now(), threadTs: session.threadTs, session: session.id }])
     let posted: PostResult
     try {
       posted = await this.deps.slack.postToKid(slackText, session.threadTs)
@@ -297,7 +304,7 @@ export class HubCore {
       const e = err as Error
       this.log(`slack post failed ${errorName(e)}`)
       const definite = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError || e instanceof SlackApiError
-      if (cid) await this.putCids(definite ? others : [...others, { cid, state: 'uncertain', at: this.deps.now(), threadTs: session.threadTs }])
+      if (cid) await this.putCids(definite ? others : [...others, { cid, state: 'uncertain', at: this.deps.now(), threadTs: session.threadTs, session: session.id }])
       this.broadcast({ t: 'error', code: definite ? e.name : 'slack-unreachable', message: definite ? e.message : 'could not reach Slack', ...(cid ? { cid } : {}) })
       return null
     }
@@ -332,7 +339,7 @@ export class HubCore {
         ...(cid ? { cid } : {}),
         at: this.deps.now(),
       },
-      (seq: number): Record<string, unknown> => (cid ? { [CIDS_KEY]: [...others, { cid, seq, at: this.deps.now(), state: 'posted' as const }].slice(-CID_CAP) } : {}),
+      (seq: number): Record<string, unknown> => (cid ? { [CIDS_KEY]: [...others, { cid, seq, at: this.deps.now(), state: 'posted' as const, slackTs: posted.ts }].slice(-CID_CAP) } : {}),
     )
     this.log(`say posted seq=${item.seq} len=${item.text.length}${cid ? ' cid' : ''}${reconciled ? ' reconciled' : ''}`)
     this.broadcast({ t: 'posted', seq: item.seq, text: item.text, ...(cid ? { cid } : {}), ...(reconciled ? { dup: true } : {}) })
@@ -495,10 +502,13 @@ export class HubCore {
       this.send(ws, { t: 'error', code: 'asr-not-configured', message: 'DEEPGRAM_API_KEY is not set' })
       return
     }
-    if (this.recording) return
+    if (this.recording) {
+      this.send(ws, { t: 'error', code: 'asr-busy', message: 'another device is talking', ...(cid ? { cid } : {}) })
+      return
+    }
     let resolve: (text: string | null) => void = () => {}
     const result = new Promise<string | null>(r => (resolve = r))
-    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false, cid, resolve }
+    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false, cid, owner: ws, resolve }
     this.turn = turn
     this.turnChain = this.turnChain.then(() => result).then(text => (text ? this.sayFromGlasses(text, cid) : null)).catch(() => null)
     let socket: AsrSocket

@@ -90,7 +90,7 @@ export class KidDmClient {
     }
   }
 
-  async findOwnPost(text: string, threadTs: string | null, sinceMs: number): Promise<PostResult | null> {
+  async findOwnPost(text: string, threadTs: string | null, sinceMs: number, excludeTs: Set<string> = new Set()): Promise<PostResult | null> {
     const channel = this.kidChannelId ?? ''
     this.assertAllowed(channel)
     if (!this.userToken || !this.userToken.startsWith('xoxp-')) throw new SlackConfigError('SLACK_USER_TOKEN is missing or is not a user token (xoxp-)')
@@ -104,7 +104,7 @@ export class KidDmClient {
     if (res.status === 429) throw new SlackApiError('ratelimited', Number(res.headers.get('Retry-After') ?? '1'))
     const data = (await res.json()) as { ok?: boolean; error?: string; messages?: Array<{ ts?: string; user?: string; text?: string }> }
     if (!data.ok) throw new SlackApiError(data.error ?? `http_${res.status}`)
-    const hit = (data.messages ?? []).find(m => m.user === self && m.text === text && typeof m.ts === 'string')
+    const hit = (data.messages ?? []).find(m => m.user === self && m.text === text && typeof m.ts === 'string' && !excludeTs.has(m.ts))
     return hit ? { ts: hit.ts as string, channel } : null
   }
 

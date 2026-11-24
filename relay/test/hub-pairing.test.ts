@@ -332,3 +332,84 @@ describe('review fixes: uncertain Slack posts, evicted devices, cancel, replay m
     expect(device.of('posted')).toHaveLength(1)
   })
 })
+
+describe('review round 2 fixes', () => {
+  it('F01-A: reconcile ignores Slack messages already recorded for another cid with the same text', async () => {
+    const posts: string[] = []
+    let calls = 0
+    const { core, device } = setup({
+      slack: {
+        selfUserId: async () => FOX,
+        postToKid: async (text: string) => {
+          calls++
+          if (calls === 2) throw new TypeError('lost')
+          posts.push(text)
+          return { ts: `1700000000.00${calls}`, channel: 'D0123ABCDEF' }
+        },
+        findOwnPost: async (_t: string, _th: string | null, _s: number, exclude?: Set<string>) =>
+          exclude?.has('1700000000.001') ? null : { ts: '1700000000.001', channel: 'D0123ABCDEF' },
+      },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '好的', cid: 'cid-first-0001' }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '好的', cid: 'cid-second-002' }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '好的', cid: 'cid-second-002' }))
+    expect(posts).toHaveLength(2)
+    expect(device.of('posted').map(p => [p.cid, p.seq])).toEqual([
+      ['cid-first-0001', 1],
+      ['cid-second-002', 2],
+    ])
+  })
+
+  it('F01-B: a reconciled post from an old session does not give the new session the old thread', async () => {
+    let calls = 0
+    const { core, device, storage, advance } = setup({
+      slack: {
+        selfUserId: async () => FOX,
+        postToKid: async () => {
+          calls++
+          if (calls === 1) throw new TypeError('lost')
+          return { ts: `1700000000.10${calls}`, channel: 'D0123ABCDEF' }
+        },
+        findOwnPost: async () => ({ ts: '1700000000.555', channel: 'D0123ABCDEF' }),
+      },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'old', cid: 'cid-old-00001' }))
+    advance(31 * 60 * 1000)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'old', cid: 'cid-old-00001' }))
+    const session = await storage.get<{ threadTs: string | null }>('meta:session')
+    expect(session?.threadTs ?? null).toBeNull()
+  })
+
+  it('F02-A: a device whose pairing Fox approved before 撤销配对 is revoked even if it collects its token later', async () => {
+    const { core } = setup()
+    const s = (await core.pairRequest('/pair/start', null, 'c1'))!.body as { pairId: string; code: string }
+    await core.pairRequest('/pair-confirm', { user: FOX, code: s.code, eventId: 'c', atMs: 1_000_000 }, 'slack')
+    const r = (await core.pairRequest('/pair/poll', { pairId: s.pairId }, 'c1'))!.body as { token: string }
+    await core.pairRequest('/pair-revoke', { user: FOX, eventId: 'r', atMs: 1_000_001 }, 'slack')
+    const ws = new FakeDevice(false)
+    await core.onDeviceMessage(ws, JSON.stringify({ t: 'auth', token: r.token }))
+    expect(ws.closed).toEqual({ code: 4401, reason: 'unauthorized' })
+  })
+
+  it('F08: a second device cannot stop, cancel or feed the first device’s voice turn, and gets asr-busy', async () => {
+    const { core, devices, asr, posts } = setup()
+    const a = devices[0]
+    const b = new FakeDevice()
+    devices.push(b)
+    await core.onDeviceMessage(a, JSON.stringify({ t: 'audio.start', cid: 'cid-dev-a-001' }))
+    await core.onDeviceMessage(b, JSON.stringify({ t: 'audio.start', cid: 'cid-dev-b-001' }))
+    expect(b.of('error')).toEqual([{ t: 'error', code: 'asr-busy', message: 'another device is talking', cid: 'cid-dev-b-001' }])
+    await core.onDeviceMessage(b, new Uint8Array([9, 9]))
+    await core.onDeviceMessage(b, JSON.stringify({ t: 'audio.cancel' }))
+    await core.onDeviceMessage(b, JSON.stringify({ t: 'audio.stop' }))
+    expect(core.recording).toBe(true)
+    await core.onDeviceMessage(a, new Uint8Array([1, 2]))
+    expect(asr.sent.filter(d => typeof d !== 'string').map(d => Array.from(d as Uint8Array))).toEqual([[1, 2]])
+    asr.result('a 的话', true)
+    await core.onDeviceMessage(a, JSON.stringify({ t: 'audio.stop' }))
+    asr.close(1000)
+    await core.turnsSettled
+    await flush()
+    expect(posts).toHaveLength(1)
+  })
+})

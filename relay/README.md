@@ -163,7 +163,7 @@ Each route fails closed when its secret is missing:
 | `{"t":"auth","token":"…"}` | Must be the first frame. `token` is `DEVICE_TOKEN` or a paired device token (`kgd_…`) |
 | `{"t":"hello","lastSeq":N}` | The relay replies with `hello` and replays every retained message after `N` |
 | `{"t":"say","text":"…","cid":"…"}` | Post text to Kid. `cid` (8–64 of `A-Za-z0-9_-`, e.g. a UUID) is optional. A repeated `cid` is not posted again: the relay re-acks with `posted {seq, cid, dup: true}` |
-| `{"t":"audio.start","cid":"…"}` | Start a speech turn. The transcript is posted with this `cid` |
+| `{"t":"audio.start","cid":"…"}` | Start a speech turn. The transcript is posted with this `cid`. The turn belongs to that socket: audio, `audio.stop` and `audio.cancel` from other devices are ignored, and a second `audio.start` gets `error asr-busy` |
 | binary frames | PCM 16 kHz s16le mono, about 3200 B per 100 ms |
 | `{"t":"audio.cancel"}` | Abandon the turn: nothing is posted. The relay also cancels a turn whose last device disconnects before `audio.stop` |
 | `{"t":"audio.stop"}` | End the turn. Deepgram's final transcript is posted to Kid. If the stream fails or closes before the stop, the relay sends `error asr-interrupted` and posts nothing |
@@ -193,7 +193,9 @@ Each route fails closed when its secret is missing:
   - **Success:** the mark becomes `posted`, atomically with the history entry.
   - **Definite refusal** (Slack answered `ok:false`, or a config error): the mark is removed, so a resend posts normally.
   - **Uncertain** (network error, or the DO died mid-call): the mark stays. On the resend the relay first looks for its own message with the same text in that thread or the DM (`conversations.replies` / `conversations.history`, `im:history`). If it finds one, it records that post and calls the webhook; if not, it posts. If Slack cannot be checked, it posts nothing and reports `slack-unreachable`.
-- The plugin retries errors that are not permanent on the same socket, after 5 s, then 10 s, with the same cid. A turn is given up after 3 errors.
+- The plugin retries errors that are not permanent on the same socket, after 10 s, 30 s and 90 s, with the same cid. A turn is given up after 4 errors.
+- Reconcile skips Slack messages already recorded for another cid, so two turns with the same text in one thread are never confused. A reconciled post keeps its original session and thread.
+- Not covered: a voice turn whose transcript Slack rejects is not retried, because its text is not kept on the device. Reconcile reads one page (200 messages) of the thread or DM.
 - A duplicate is answered from history and never calls Slack or the Kid webhook.
 - `msg` / `history` items for glasses turns carry their `cid`, so a replay clears the outbox as well.
 - A voice turn cannot be resent: the audio is not kept. If the socket drops mid-turn, the relay reports `asr-interrupted` and posts nothing.
@@ -220,7 +222,7 @@ The device token never passes through a chat and is not in the public bundle. A 
    - The sender is the installing user from `authorizations`, if present.
 4. The hub then requires `user == auth.test user id` (Fox).
 5. The code is compared in constant time and is single use.
-   - The message time must fall within that pairing's lifetime (allowing 60 s of skew).
+   - The message time must fall within that pairing's lifetime (allowing 10 s of skew).
    - Each confirming message (`pair:<message ts>`) is processed once, so Slack redeliveries change nothing.
    - After 5 wrong codes within 10 min, confirmations are locked for 10 min and pending pairings are cleared.
    - Each client can hold at most 2 pending pairings.
@@ -231,7 +233,7 @@ Device auth accepts `DEVICE_TOKEN` or a paired token. A rejected paired token (c
 
 **Revoking.**
 
-- Fox sends `撤销配对` in the same DM, with the same checks as above. Every device paired before that message is deleted, and its sockets are closed with 4401 `revoked`. A redelivered or late revoke cannot remove devices paired after it.
+- Fox sends `撤销配对` in the same DM, with the same checks as above. Every device whose pairing Fox confirmed before that message is deleted, even if it collected its token after the revoke was sent, and its sockets are closed with 4401 `revoked`. A redelivered or late revoke cannot remove devices confirmed after it.
 - Rotating `DEVICE_TOKEN` does **not** revoke paired tokens, and `撤销配对` does not affect `DEVICE_TOKEN`.
 - Fallback without Slack: delete the DO storage keys `pair:devices` and `pair:pending`. The other DO keys (history, session) are unaffected.
 

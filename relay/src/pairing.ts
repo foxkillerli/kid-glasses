@@ -17,7 +17,7 @@ export const FAILS_KEY = 'pair:fails'
 export const EVENTS_KEY = 'pair:events'
 export const EVENTS_CAP = 200
 export const MAX_PENDING_PER_CLIENT = 2
-export const CONFIRM_SKEW_MS = 60_000
+export const CONFIRM_SKEW_MS = 10_000
 
 export interface PendingPair {
   pairId: string
@@ -25,6 +25,7 @@ export interface PendingPair {
   createdAt: number
   expiresAt: number
   confirmed: boolean
+  confirmedAtMs?: number
   client: string
 }
 
@@ -37,6 +38,7 @@ export interface PairedDevice {
   id: string
   hash: string
   createdAt: number
+  confirmedAtMs?: number
 }
 
 interface FailState {
@@ -156,6 +158,7 @@ export class Pairing {
       }
       if (hit) {
         hit.confirmed = true
+        hit.confirmedAtMs = meta.atMs
         await this.deps.storage.putAll({ [PENDING_KEY]: list, [FAILS_KEY]: { count: 0, windowStart: now, lockedUntil: 0 }, [EVENTS_KEY]: ev.next })
         return { ok: true }
       }
@@ -180,7 +183,7 @@ export class Pairing {
       if (!hit) return { status: 'expired' }
       if (!hit.confirmed) return { status: 'pending', expiresAt: hit.expiresAt }
       const token = DEVICE_TOKEN_PREFIX + hex(this.randomBytes(32))
-      const device: PairedDevice = { id: hex(this.randomBytes(6)), hash: await sha256Hex(token), createdAt: this.deps.now() }
+      const device: PairedDevice = { id: hex(this.randomBytes(6)), hash: await sha256Hex(token), createdAt: this.deps.now(), confirmedAtMs: hit.confirmedAtMs ?? this.deps.now() }
       const all = [...((await this.deps.storage.get<PairedDevice[]>(DEVICES_KEY)) ?? []), device]
       const devices = all.slice(-MAX_DEVICES)
       const evicted = all.slice(0, Math.max(0, all.length - MAX_DEVICES)).map(d => d.id)
@@ -205,10 +208,11 @@ export class Pairing {
       if (ev.seen) return { ok: false, reason: 'duplicate-event' }
       const devices = (await this.deps.storage.get<PairedDevice[]>(DEVICES_KEY)) ?? []
       const pending = (await this.deps.storage.get<PendingPair[]>(PENDING_KEY)) ?? []
-      const revoked = devices.filter(d => d.createdAt <= meta.atMs)
+      const before = (d: PairedDevice) => (d.confirmedAtMs ?? d.createdAt) <= meta.atMs
+      const revoked = devices.filter(before)
       await this.deps.storage.putAll({
-        [DEVICES_KEY]: devices.filter(d => d.createdAt > meta.atMs),
-        [PENDING_KEY]: pending.filter(p => p.createdAt > meta.atMs),
+        [DEVICES_KEY]: devices.filter(d => !before(d)),
+        [PENDING_KEY]: pending.filter(p => p.createdAt > meta.atMs && !(p.confirmed && (p.confirmedAtMs ?? 0) <= meta.atMs)),
         [EVENTS_KEY]: ev.next,
       })
       return { ok: true, revoked: revoked.map(d => d.id) }
