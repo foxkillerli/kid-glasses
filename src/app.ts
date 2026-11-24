@@ -28,7 +28,13 @@ import {
 import { capacityPages, type CapacityPage } from './content/capacity'
 
 export const APP_NAME = 'kid-glasses'
-export const WS_URL = 'wss://echo.websocket.org'
+export const PUBLIC_ECHO_URL = 'wss://echo.websocket.org'
+
+export function echoUrlFor(loc: { protocol: string; host: string; hostname: string }): string {
+  const local = loc.hostname === 'localhost' || loc.hostname === '127.0.0.1'
+  if (loc.protocol === 'https:' && !local) return `wss://${loc.host}/echo`
+  return PUBLIC_ECHO_URL
+}
 const HEARTBEAT_MS = 1000
 const WS_PING_MS = 5000
 const BODY_MAX_LINES = 7
@@ -175,7 +181,7 @@ export class App {
       if (this.pendingKey === key) this.pendingKey = ''
     }
     this.ws = new WsProbe({
-      url: WS_URL,
+      url: echoUrlFor(window.location),
       pingEveryMs: WS_PING_MS,
       reconnectMs: 3000,
       now: () => Date.now(),

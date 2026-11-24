@@ -42,6 +42,7 @@ export class WsProbe {
   constructor(private readonly opts: WsProbeOptions) {}
 
   start(): void {
+    this.opts.log(`ws target ${this.opts.url}`)
     this.connect()
   }
 
