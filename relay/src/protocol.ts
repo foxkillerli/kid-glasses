@@ -3,6 +3,7 @@ export const MAX_SAY_CHARS = 2000
 export type Speaker = 'kid' | 'glasses' | 'fast'
 
 export type ClientMessage =
+  | { t: 'auth'; token: string }
   | { t: 'hello'; lastSeq?: number }
   | { t: 'ping' }
   | { t: 'say'; text: string }
@@ -12,6 +13,7 @@ export type ClientMessage =
   | { t: 'session.new' }
 
 export type ServerMessage =
+  | { t: 'auth.ok' }
   | { t: 'hello'; session: string; lastSeq: number; fastLane: boolean }
   | { t: 'pong' }
   | { t: 'msg'; seq: number; from: Speaker; text: string; at: number }
@@ -35,6 +37,8 @@ export function parseClientMessage(data: string): Parsed {
   if (!m || typeof m !== 'object') return { ok: false, error: 'not-object' }
   const o = m as Record<string, unknown>
   switch (o.t) {
+    case 'auth':
+      return typeof o.token === 'string' ? { ok: true, msg: { t: 'auth', token: o.token } } : { ok: false, error: 'bad-token' }
     case 'hello':
       return o.lastSeq === undefined || nonNegInt(o.lastSeq)
         ? { ok: true, msg: { t: 'hello', lastSeq: o.lastSeq as number | undefined } }

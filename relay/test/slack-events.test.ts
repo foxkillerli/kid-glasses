@@ -41,9 +41,16 @@ describe('routeSlackEvent', () => {
     expect(routeSlackEvent(msg({ text: '   ' }), KID)).toEqual({ kind: 'ignore', reason: 'empty' })
   })
 
-  it("ignores Fox's own messages, by installer user id or by the glasses prefix", () => {
+  it("ignores Fox's own messages by installer user id", () => {
     expect(routeSlackEvent(msg({ user: FOX }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
-    expect(routeSlackEvent(msg({ user: 'UOTHER0001', text: '〔眼镜〕今天几点放学' }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+  })
+
+  it('delivers a Kid reply that happens to start with 〔眼镜〕', () => {
+    expect(routeSlackEvent(msg({ user: 'UKID00001', text: '〔眼镜〕你刚才说的我收到了' }), KID).kind).toBe('kid-message')
+  })
+
+  it('falls back to the prefix only when the payload names no installing user', () => {
+    expect(routeSlackEvent(msg({ text: '〔眼镜〕hi' }, { authorizations: [] }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
   })
 
   it('ignores everything when the Kid channel is not configured', () => {

@@ -42,9 +42,10 @@ export function routeSlackEvent(body: unknown, kidChannelId: string | undefined)
   if (!ALLOWED_SUBTYPES.has(subtype)) return { kind: 'ignore', reason: `subtype:${subtype}` }
   if (e.hidden) return { kind: 'ignore', reason: 'hidden' }
   const user = typeof e.user === 'string' ? e.user : null
-  if (user && installerUserIds(b).has(user)) return { kind: 'ignore', reason: 'own-message' }
+  const installers = installerUserIds(b)
+  if (user && installers.has(user)) return { kind: 'ignore', reason: 'own-message' }
   const text = typeof e.text === 'string' ? e.text : ''
-  if (isFromGlasses(text)) return { kind: 'ignore', reason: 'own-message' }
+  if (installers.size === 0 && isFromGlasses(text)) return { kind: 'ignore', reason: 'own-message' }
   if (!text.trim()) return { kind: 'ignore', reason: 'empty' }
   if (typeof e.ts !== 'string') return { kind: 'ignore', reason: 'no-ts' }
   return {

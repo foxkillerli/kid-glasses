@@ -1,6 +1,7 @@
 import { CLOSE_STREAM, TranscriptAssembler, parseDeepgramMessage } from './deepgram'
+import { checkDeviceToken, isAuthedAttachment, type SocketAttachment } from './device-auth'
 import type { FastLane } from './fast-lane'
-import { HistoryStore, type HistoryItem, type KvStorage } from './history'
+import { HistoryStore, PAGE_MAX, type HistoryItem, type KvStorage } from './history'
 import { parseClientMessage, type ServerMessage } from './protocol'
 import { cleanText, fromSlack, toSlack } from './sanitize'
 import type { KidMessage } from './slack-events'
@@ -8,17 +9,21 @@ import type { PostResult } from './slack-client'
 
 export interface DeviceSocket {
   send(data: string): void
+  close(code?: number, reason?: string): void
+  serializeAttachment(value: unknown): void
+  deserializeAttachment(): unknown
 }
 
 export interface AsrSocket {
   send(data: string | ArrayBuffer | ArrayBufferView): void
   close(code?: number, reason?: string): void
-  addEventListener(type: 'message' | 'close' | 'error', listener: (ev: { data?: unknown }) => void): void
+  addEventListener(type: 'message' | 'close' | 'error', listener: (ev: { data?: unknown; code?: number }) => void): void
 }
 
 export interface HubDeps {
   storage: KvStorage
   sockets: () => DeviceSocket[]
+  deviceToken?: string
   slack: { postToKid(text: string, threadTs: string | null): Promise<PostResult> }
   asr: { connect(): Promise<AsrSocket> } | null
   fastLane: FastLane
@@ -38,8 +43,10 @@ export const SEEN_KEY = 'meta:seen'
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SEEN_CAP = 200
 export const PENDING_AUDIO_CAP = 100
+export const CLOSE_UNAUTHORIZED = 4401
+export const CLOSE_NOT_CONFIGURED = 4503
 
-interface AsrState {
+interface AsrTurn {
   socket: AsrSocket | null
   assembler: TranscriptAssembler
   pending: Array<ArrayBuffer | ArrayBufferView>
@@ -47,9 +54,18 @@ interface AsrState {
   finished: boolean
 }
 
+export function isAuthed(ws: DeviceSocket): boolean {
+  try {
+    return isAuthedAttachment(ws.deserializeAttachment())
+  } catch {
+    return false
+  }
+}
+
 export class HubCore {
   readonly history: HistoryStore
-  private asr: AsrState | null = null
+  private turn: AsrTurn | null = null
+  private queue: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly deps: HubDeps) {
     this.history = new HistoryStore(deps.storage)
@@ -57,6 +73,12 @@ export class HubCore {
 
   private log(m: string): void {
     this.deps.log?.(m)
+  }
+
+  private enqueue<T>(fn: () => Promise<T>): Promise<T> {
+    const run = this.queue.then(fn)
+    this.queue = run.catch(() => null)
+    return run
   }
 
   send(ws: DeviceSocket, msg: ServerMessage): void {
@@ -68,23 +90,40 @@ export class HubCore {
   }
 
   broadcast(msg: ServerMessage): void {
-    for (const ws of this.deps.sockets()) this.send(ws, msg)
+    for (const ws of this.deps.sockets()) if (isAuthed(ws)) this.send(ws, msg)
   }
 
   private toWire(i: HistoryItem) {
     return { seq: i.seq, from: i.from, text: i.text, at: i.at }
   }
 
-  async currentSession(forceNew = false): Promise<Session> {
+  private isLive(s: Session | undefined, now: number): s is Session {
+    return !!s && now - s.lastAt < SESSION_IDLE_MS
+  }
+
+  private async currentSession(forceNew = false): Promise<Session> {
     const now = this.deps.now()
     const s = await this.deps.storage.get<Session>(SESSION_KEY)
-    if (!forceNew && s && now - s.lastAt < SESSION_IDLE_MS) return s
+    if (!forceNew && this.isLive(s, now)) return s
     const fresh: Session = { id: `s${now.toString(36)}`, threadTs: null, startedAt: now, lastAt: now }
     await this.deps.storage.put(SESSION_KEY, fresh)
     return fresh
   }
 
+  private rejectUnauthed(ws: DeviceSocket, code: number, reason: string): void {
+    this.send(ws, { t: 'error', code: reason, message: 'authenticate first with {"t":"auth","token":…}' })
+    try {
+      ws.close(code, reason)
+    } catch {
+      return
+    }
+  }
+
   async onDeviceMessage(ws: DeviceSocket, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    if (!isAuthed(ws)) {
+      await this.authenticate(ws, data)
+      return
+    }
     if (typeof data !== 'string') {
       this.onAudioFrame(data)
       return
@@ -96,10 +135,14 @@ export class HubCore {
     }
     const m = parsed.msg
     switch (m.t) {
+      case 'auth':
+        this.send(ws, { t: 'auth.ok' })
+        return
       case 'hello': {
-        const session = await this.currentSession()
-        this.send(ws, { t: 'hello', session: session.id, lastSeq: await this.history.lastSeq(), fastLane: this.deps.fastLane.enabled })
-        if (m.lastSeq !== undefined) for (const i of await this.history.since(m.lastSeq)) this.send(ws, { t: 'msg', ...this.toWire(i) })
+        const session = await this.enqueue(() => this.currentSession())
+        const lastSeq = await this.history.lastSeq()
+        this.send(ws, { t: 'hello', session: session.id, lastSeq, fastLane: this.deps.fastLane.enabled })
+        if (m.lastSeq !== undefined) await this.replay(ws, m.lastSeq, lastSeq)
         return
       }
       case 'ping':
@@ -120,12 +163,37 @@ export class HubCore {
         return
       }
       case 'session.new':
-        await this.currentSession(true)
+        await this.enqueue(() => this.currentSession(true))
         return
     }
   }
 
-  async sayFromGlasses(raw: string): Promise<HistoryItem | null> {
+  private async authenticate(ws: DeviceSocket, data: string | ArrayBuffer | ArrayBufferView): Promise<void> {
+    const parsed = typeof data === 'string' ? parseClientMessage(data) : null
+    if (!parsed?.ok || parsed.msg.t !== 'auth') return this.rejectUnauthed(ws, CLOSE_UNAUTHORIZED, 'unauthorized')
+    const verdict = checkDeviceToken(parsed.msg.token, this.deps.deviceToken)
+    if (verdict === 'not-configured') return this.rejectUnauthed(ws, CLOSE_NOT_CONFIGURED, 'device-token-not-configured')
+    if (verdict !== 'ok') return this.rejectUnauthed(ws, CLOSE_UNAUTHORIZED, 'unauthorized')
+    const attachment: SocketAttachment = { authed: true, connectedAt: this.deps.now() }
+    ws.serializeAttachment(attachment)
+    this.send(ws, { t: 'auth.ok' })
+  }
+
+  private async replay(ws: DeviceSocket, afterSeq: number, upTo: number): Promise<void> {
+    let cursor = afterSeq
+    while (cursor < upTo) {
+      const batch = await this.history.since(cursor, PAGE_MAX)
+      if (batch.length === 0) break
+      for (const i of batch) if (i.seq <= upTo) this.send(ws, { t: 'msg', ...this.toWire(i) })
+      cursor = batch[batch.length - 1].seq
+    }
+  }
+
+  sayFromGlasses(raw: string): Promise<HistoryItem | null> {
+    return this.enqueue(() => this.postNow(raw))
+  }
+
+  private async postNow(raw: string): Promise<HistoryItem | null> {
     const slackText = toSlack(raw)
     if (!slackText) {
       this.broadcast({ t: 'error', code: 'empty-text', message: 'nothing to send' })
@@ -137,7 +205,7 @@ export class HubCore {
       posted = await this.deps.slack.postToKid(slackText, session.threadTs)
     } catch (err) {
       const e = err as Error
-      this.log(`slack post failed ${e.name}: ${e.message}`)
+      this.log(`slack post failed ${e.name}`)
       this.broadcast({ t: 'error', code: e.name || 'slack-error', message: e.message })
       return null
     }
@@ -164,18 +232,22 @@ export class HubCore {
   async onKidMessage(msg: KidMessage): Promise<HistoryItem | null> {
     const seen = (await this.deps.storage.get<string[]>(SEEN_KEY)) ?? []
     if (seen.includes(msg.eventId)) return null
-    await this.deps.storage.put(SEEN_KEY, [...seen, msg.eventId].slice(-SEEN_CAP))
     const text = fromSlack(msg.text)
-    if (!text) return null
-    const item = await this.history.append({ from: 'kid', text, slackTs: msg.ts, threadTs: msg.threadTs, at: this.deps.now() })
+    let item: HistoryItem | null = null
+    if (text) item = await this.history.append({ from: 'kid', text, slackTs: msg.ts, threadTs: msg.threadTs, at: this.deps.now() })
+    await this.deps.storage.put(SEEN_KEY, [...seen, msg.eventId].slice(-SEEN_CAP))
+    if (!item) return null
     this.broadcast({ t: 'msg', ...this.toWire(item) })
-    const session = await this.deps.storage.get<Session>(SESSION_KEY)
-    if (session) await this.deps.storage.put(SESSION_KEY, { ...session, lastAt: this.deps.now() })
+    await this.enqueue(async () => {
+      const now = this.deps.now()
+      const s = await this.deps.storage.get<Session>(SESSION_KEY)
+      if (this.isLive(s, now)) await this.deps.storage.put(SESSION_KEY, { ...s, lastAt: now })
+    })
     return item
   }
 
-  get asrActive(): boolean {
-    return !!this.asr && !this.asr.finished
+  get recording(): boolean {
+    return !!this.turn && !this.turn.finished && !this.turn.stopRequested
   }
 
   async startAsr(ws: DeviceSocket): Promise<void> {
@@ -183,61 +255,66 @@ export class HubCore {
       this.send(ws, { t: 'error', code: 'asr-not-configured', message: 'DEEPGRAM_API_KEY is not set' })
       return
     }
-    if (this.asrActive) return
-    const state: AsrState = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false }
-    this.asr = state
+    if (this.recording) return
+    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false }
+    this.turn = turn
     let socket: AsrSocket
     try {
       socket = await this.deps.asr.connect()
     } catch (err) {
-      state.finished = true
+      turn.finished = true
       this.broadcast({ t: 'error', code: 'asr-connect-failed', message: String(err) })
       return
     }
-    state.socket = socket
+    turn.socket = socket
     socket.addEventListener('message', ev => {
-      if (typeof ev.data !== 'string') return
+      if (typeof ev.data !== 'string' || turn.finished) return
       const r = parseDeepgramMessage(ev.data)
       if (!r) return
-      const { partial } = state.assembler.feed(r)
+      const { partial } = turn.assembler.feed(r)
       if (partial) this.broadcast({ t: 'asr.partial', text: partial })
     })
     socket.addEventListener('close', () => {
-      void this.finishAsr(state)
+      void this.finishAsr(turn, turn.stopRequested)
     })
     socket.addEventListener('error', () => {
-      void this.finishAsr(state)
+      void this.finishAsr(turn, false)
     })
-    for (const frame of state.pending) socket.send(frame)
-    state.pending = []
-    if (state.stopRequested) socket.send(CLOSE_STREAM)
+    for (const frame of turn.pending) socket.send(frame)
+    turn.pending = []
+    if (turn.stopRequested) socket.send(CLOSE_STREAM)
   }
 
   onAudioFrame(frame: ArrayBuffer | ArrayBufferView): void {
-    const s = this.asr
-    if (!s || s.finished || s.stopRequested) return
-    if (s.socket) s.socket.send(frame)
-    else if (s.pending.length < PENDING_AUDIO_CAP) s.pending.push(frame)
+    const t = this.turn
+    if (!t || t.finished || t.stopRequested) return
+    if (t.socket) t.socket.send(frame)
+    else if (t.pending.length < PENDING_AUDIO_CAP) t.pending.push(frame)
   }
 
   stopAsr(reason: string): void {
-    const s = this.asr
-    if (!s || s.finished || s.stopRequested) return
-    s.stopRequested = true
+    const t = this.turn
+    if (!t || t.finished || t.stopRequested) return
+    t.stopRequested = true
     this.log(`asr stop (${reason})`)
-    if (s.socket) {
+    if (t.socket) {
       try {
-        s.socket.send(CLOSE_STREAM)
+        t.socket.send(CLOSE_STREAM)
       } catch {
-        void this.finishAsr(s)
+        void this.finishAsr(t, false)
       }
     }
   }
 
-  private async finishAsr(s: AsrState): Promise<void> {
-    if (s.finished) return
-    s.finished = true
-    const text = s.assembler.finalText()
+  private async finishAsr(t: AsrTurn, completed: boolean): Promise<void> {
+    if (t.finished) return
+    t.finished = true
+    if (this.turn === t) this.turn = null
+    const text = t.assembler.finalText()
+    if (!completed) {
+      this.broadcast({ t: 'error', code: 'asr-interrupted', message: 'transcription ended early; nothing was sent' })
+      return
+    }
     this.broadcast({ t: 'asr.final', text })
     if (text) await this.sayFromGlasses(text)
   }

@@ -13,7 +13,7 @@ This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 pl
 |---|---|
 | `wrangler.jsonc` | Worker `kid-glasses-relay`; DO binding `HUB` → `RelayHub`; migration `v1` with `new_sqlite_classes` (the Workers Free plan only allows SQLite-backed DOs); non-secret vars |
 | `src/index.ts` | Router: `GET /health`, `GET /device` (WebSocket), `POST /slack/events` |
-| `src/hub.ts` | `RelayHub` Durable Object: WebSocket Hibernation API for devices, SQLite-backed KV storage |
+| `src/hub.ts` | `RelayHub` Durable Object: WebSocket Hibernation API for devices (a per-socket attachment records `authed`), an alarm that closes sockets still unauthenticated after 10 s, SQLite-backed KV storage |
 | `src/hub-core.ts` | Hub logic, runtime-free so it can be tested: sessions, threads, history, ASR flow, fast lane |
 | `src/slack-verify.ts` | Slack signing-secret check (`v0:ts:body`, HMAC-SHA256, 5 min skew, constant-time compare) |
 | `src/slack-events.ts` | Event routing: `url_verification`; `message` in the Kid DM only; skips edits, deletes, hidden messages and Fox's own posts |
@@ -21,7 +21,7 @@ This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 pl
 | `src/sanitize.ts` | Outgoing: `〔眼镜〕` prefix, Slack `& < >` escaping (no mentions can form), control-char removal, 1500-char cap. Incoming: Slack markup to plain lens text, 2000-char cap |
 | `src/deepgram.ts` | Streaming URL (`linear16`, 16 kHz, mono, `nova-3` + `multi`), result parsing, transcript joining (no spaces between CJK) |
 | `src/history.ts` | Paged message history in DO storage, newest 500 kept |
-| `src/device-auth.ts` | Device token check |
+| `src/device-auth.ts` | Device token check, done on the first WebSocket frame and never in the handshake |
 | `src/protocol.ts` | Device message types and validation |
 | `src/fast-lane.ts` | Fast-answer lane: **off** unless `FAST_LANE_ENABLED="true"` **and** `FAST_LLM_KEY` is set. The answer function is a stub. |
 
@@ -45,22 +45,30 @@ Fox enters every secret himself, in the Cloudflare dashboard or with `wrangler s
 Each route fails closed when its secret is missing:
 
 - `/slack/events` returns 503 without a signing secret.
-- `/device` returns 503 without `DEVICE_TOKEN`.
+- `/device` returns 503 without `DEVICE_TOKEN`; a socket whose first frame is not a valid `auth` is closed with 4401 (4503 if the token is unset).
 - Posting throws `SlackConfigError` without a valid token or channel.
 
 ## Device protocol (`wss://<relay>/device`)
 
-**Authentication.** The client offers the subprotocols `kg.v1` and `kg-token.<DEVICE_TOKEN>`. A browser `WebSocket` cannot set headers, so the token travels in a subprotocol. The relay answers with `kg.v1`. Non-browser clients may send `Authorization: Bearer <token>` instead.
+**Authentication.**
+
+1. The client connects with the public subprotocol `kg.v1` only. No secret goes in the handshake, because request headers can show up in Cloudflare request traces.
+2. Its first frame must be `{"t":"auth","token":"<DEVICE_TOKEN>"}`. The relay answers `auth.ok`.
+3. Until then the socket receives nothing:
+   - no broadcasts, history or replies;
+   - any other frame closes it with 4401;
+   - an alarm closes it after 10 s.
 
 **Client → relay**
 
 | Message | Meaning |
 |---|---|
-| `{"t":"hello","lastSeq":N}` | The relay replies with `hello` and replays history after `N` |
+| `{"t":"auth","token":"…"}` | Must be the first frame |
+| `{"t":"hello","lastSeq":N}` | The relay replies with `hello` and replays every retained message after `N` |
 | `{"t":"say","text":"…"}` | Post text to Kid |
 | `{"t":"audio.start"}` | Start a speech turn |
 | binary frames | PCM 16 kHz s16le mono, about 3200 B per 100 ms |
-| `{"t":"audio.stop"}` | End the turn. Deepgram's final transcript is posted to Kid |
+| `{"t":"audio.stop"}` | End the turn. Deepgram's final transcript is posted to Kid. If the stream fails or closes before the stop, the relay sends `error asr-interrupted` and posts nothing |
 | `{"t":"history","before":seq,"limit":n}` | Fetch older messages |
 | `{"t":"session.new"}` | Start a new Slack thread |
 | `{"t":"ping"}` | Keep-alive |
@@ -69,6 +77,7 @@ Each route fails closed when its secret is missing:
 
 | Message | Meaning |
 |---|---|
+| `auth.ok` | Authentication accepted |
 | `hello` | Greeting, with `lastSeq` |
 | `msg` | A message, `from` = `kid` / `glasses` / `fast` |
 | `asr.partial` / `asr.final` | Live and final transcript |
@@ -78,6 +87,12 @@ Each route fails closed when its secret is missing:
 | `pong` | Reply to `ping` |
 
 **Sessions and threads.** The first post of a session starts a new Slack thread. Later posts reply in that thread. A session ends after 30 min idle, or on `session.new`.
+
+- Posts, session changes and session refreshes run through one queue, so a session never opens two threads.
+- An in-flight post cannot undo `session.new`.
+- A late Kid reply cannot revive an expired session.
+
+**Slack delivery.** `/slack/events` waits for the DO to store the message before it returns 200. On failure it returns 500, so Slack retries. The history entry is written before the event id is marked seen.
 
 ## Develop
 
@@ -89,11 +104,19 @@ npm test
 
 From the repo root, `npm run relay:test` does the same. Deployment will go through the Cloudflare MCP (no `wrangler login`) and only when Fox asks for it.
 
+## Review
+
+- Round 1: a cross-family review (GPT) found one BLOCK and seven FIX_NEXT issues.
+  - The BLOCK: the device token travelled in the WebSocket handshake.
+  - The FIX_NEXT issues: Slack acked before the message was stored; session and thread races; replay capped at 50; overlapping or failed ASR turns; close code 1005; the prefix filter dropping Kid replies; emoji stripping eating `12:30:45`.
+- All eight are fixed and covered by `test/hub-core.test.ts` ("review fixes"), `test/hub.test.ts`, `test/router.test.ts`, `test/slack-events.test.ts` and `test/sanitize.test.ts`.
+- The reviewer's own 11 offline regression checks pass.
+
 ## Known gaps
 
 These are unverified or not built yet:
 
-- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. The router already drops Fox's own user id and anything starting with `〔眼镜〕`.
+- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. The router drops Fox's own user id, taken from `authorizations`. The `〔眼镜〕` prefix is used only as a fallback when the payload names no installing user.
 - **Deepgram auth header.** It is not verified that an `Authorization` header passes through a Worker's outbound `fetch` WebSocket upgrade. The Cloudflare docs only show `Upgrade`. If it does not, Deepgram also accepts the key as a WebSocket subprotocol.
 - **ASR limits.** There is no limit on turn length and no `KeepAlive`. Deepgram closes a stream after about 10 s without audio. The device is expected to send `audio.stop` on release.
 - **Plugin client.** The M1 plugin client (device-side WebSocket, entering `DEVICE_TOKEN` on the phone, paging replies with `LENS_TEXT`) is not written yet.

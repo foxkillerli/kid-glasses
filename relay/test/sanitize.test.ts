@@ -28,6 +28,8 @@ describe('fromSlack (Slack -> lens)', () => {
     expect(fromSlack('a &lt;b&gt; &amp; c')).toBe('a <b> & c')
     expect(fromSlack('&gt; quoted\nreply')).toBe('quoted\nreply')
     expect(fromSlack('好的 :thumbsup: 明天见 :smile:')).toBe('好的 明天见')
+    expect(fromSlack('12:30:45 放学，9:00:00 到校')).toBe('12:30:45 放学，9:00:00 到校')
+    expect(fromSlack('赞 :+1: 时间 a:b:c')).toBe('赞 时间 a:b:c')
   })
 
   it('removes control characters and caps length', () => {

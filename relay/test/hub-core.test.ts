@@ -133,3 +133,171 @@ describe('HubCore', () => {
     expect(device.of('msg')).toMatchObject([{ from: 'fast', text: 're: hi' }])
   })
 })
+
+describe('HubCore ordering', () => {
+  it('serialises concurrent posts so one session never opens two threads', async () => {
+    const posts: Array<string | null> = []
+    let n = 0
+    const storage = new FakeStorage()
+    const device = new FakeDevice()
+    const core = new HubCore({
+      storage,
+      sockets: () => [device],
+      slack: {
+        postToKid: async (_text, threadTs) => {
+          posts.push(threadTs)
+          await new Promise(r => setTimeout(r, 5))
+          return { ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }
+        },
+      },
+      asr: null,
+      fastLane: DISABLED_FAST_LANE,
+      now: () => 1,
+    })
+    await Promise.all([core.sayFromGlasses('a'), core.sayFromGlasses('b'), core.sayFromGlasses('c')])
+    expect(posts).toEqual([null, '1700000000.000', '1700000000.000'])
+    expect(device.of('posted').map(m => m.text)).toEqual(['a', 'b', 'c'])
+  })
+})
+
+describe('HubCore review fixes', () => {
+  const TOKEN = 't'.repeat(40)
+
+  function core(over: Partial<HubDeps> = {}, devices: FakeDevice[] = []) {
+    const asr = new FakeAsr()
+    const posts: Array<{ text: string; threadTs: string | null }> = []
+    let now = 1_000_000
+    let n = 0
+    const c = new HubCore({
+      storage: new FakeStorage(),
+      sockets: () => devices,
+      deviceToken: TOKEN,
+      slack: {
+        postToKid: async (text, threadTs) => {
+          posts.push({ text, threadTs })
+          return { ts: `9.${n++}`, channel: 'D0123ABCDEF' }
+        },
+      },
+      asr: { connect: async () => asr },
+      fastLane: DISABLED_FAST_LANE,
+      now: () => now,
+      ...over,
+    })
+    return { c, asr, posts, advance: (ms: number) => (now += ms) }
+  }
+
+  it('F1: an unauthenticated socket gets nothing until it sends the token in the first frame', async () => {
+    const stranger = new FakeDevice(false)
+    const { c } = core({}, [stranger])
+    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'secret news', ts: '1', threadTs: null })
+    expect(stranger.sent).toEqual([])
+    await c.onDeviceMessage(stranger, JSON.stringify({ t: 'history' }))
+    expect(stranger.closed).toEqual({ code: 4401, reason: 'unauthorized' })
+    expect(stranger.of('history')).toEqual([])
+  })
+
+  it('F1: a wrong token closes the socket; the right token authenticates it', async () => {
+    const bad = new FakeDevice(false)
+    const good = new FakeDevice(false)
+    const { c } = core({}, [bad, good])
+    await c.onDeviceMessage(bad, JSON.stringify({ t: 'auth', token: 'wrong' }))
+    expect(bad.closed?.code).toBe(4401)
+    await c.onDeviceMessage(good, JSON.stringify({ t: 'auth', token: TOKEN }))
+    expect(good.of('auth.ok')).toHaveLength(1)
+    expect(good.closed).toBeNull()
+    await c.onDeviceMessage(good, JSON.stringify({ t: 'ping' }))
+    expect(good.of('pong')).toHaveLength(1)
+  })
+
+  it('F1: with DEVICE_TOKEN unset every socket is refused', async () => {
+    const d = new FakeDevice(false)
+    const { c } = core({ deviceToken: undefined }, [d])
+    await c.onDeviceMessage(d, JSON.stringify({ t: 'auth', token: '' }))
+    expect(d.closed?.code).toBe(4503)
+  })
+
+  it('F3: session.new during an in-flight post is not undone by the post finishing', async () => {
+    const d = new FakeDevice()
+    let release: () => void = () => {}
+    const posts: Array<string | null> = []
+    const { c } = core(
+      {
+        slack: {
+          postToKid: async (_t, threadTs) => {
+            posts.push(threadTs)
+            if (posts.length === 1) await new Promise<void>(r => (release = r))
+            return { ts: `9.${posts.length}`, channel: 'D0123ABCDEF' }
+          },
+        },
+      },
+      [d],
+    )
+    const first = c.sayFromGlasses('one')
+    await flush()
+    const reset = c.onDeviceMessage(d, JSON.stringify({ t: 'session.new' }))
+    release()
+    await Promise.all([first, reset])
+    await c.sayFromGlasses('two')
+    expect(posts).toEqual([null, null])
+  })
+
+  it('F3: a Kid reply after the session expired does not revive the old thread', async () => {
+    const { c, posts, advance } = core({}, [new FakeDevice()])
+    await c.sayFromGlasses('one')
+    advance(SESSION_IDLE_MS + 1)
+    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'late', ts: '2', threadTs: '9.0' })
+    await c.sayFromGlasses('two')
+    expect(posts.map(p => p.threadTs)).toEqual([null, null])
+  })
+
+  it('F4: hello replays every retained message after lastSeq, beyond one page', async () => {
+    const d = new FakeDevice()
+    const { c } = core({}, [])
+    for (let i = 1; i <= 120; i++) await c.onKidMessage({ eventId: `E${i}`, channel: 'D0123ABCDEF', user: 'U', text: `m${i}`, ts: `${i}`, threadTs: null })
+    await c.onDeviceMessage(d, JSON.stringify({ t: 'hello', lastSeq: 0 }))
+    const seqs = d.of('msg').map(m => m.seq)
+    expect(seqs).toHaveLength(120)
+    expect(seqs[0]).toBe(1)
+    expect(seqs.at(-1)).toBe(120)
+  })
+
+  it('F5: a new turn can start while the previous one is still draining', async () => {
+    const first = new FakeAsr()
+    const second = new FakeAsr()
+    const sockets = [first, second]
+    const d = new FakeDevice()
+    const { c, posts } = core({ asr: { connect: async () => sockets.shift() as FakeAsr } }, [d])
+    await c.onDeviceMessage(d, JSON.stringify({ t: 'audio.start' }))
+    first.result('第一句', true)
+    await c.onDeviceMessage(d, JSON.stringify({ t: 'audio.stop' }))
+    await c.onDeviceMessage(d, JSON.stringify({ t: 'audio.start' }))
+    const frame = new Uint8Array(8)
+    await c.onDeviceMessage(d, frame)
+    expect(second.sent).toEqual([frame])
+    first.close(1000)
+    await flush()
+    second.result('第二句', true)
+    await c.onDeviceMessage(d, JSON.stringify({ t: 'audio.stop' }))
+    second.close(1000)
+    await flush()
+    expect(posts.map(p => p.text)).toEqual(['〔眼镜〕第一句', '〔眼镜〕第二句'])
+  })
+
+  it('F5: an upstream failure is reported and the partial transcript is not posted', async () => {
+    const d = new FakeDevice()
+    const { c, asr, posts } = core({}, [d])
+    await c.onDeviceMessage(d, JSON.stringify({ t: 'audio.start' }))
+    asr.result('半句', true)
+    asr.emit('error', {})
+    await flush()
+    expect(posts).toEqual([])
+    expect(d.of('error').map(m => m.code)).toEqual(['asr-interrupted'])
+    const early = new FakeAsr()
+    const { c: c2, posts: posts2 } = core({ asr: { connect: async () => early } }, [d])
+    await c2.onDeviceMessage(d, JSON.stringify({ t: 'audio.start' }))
+    early.result('没说完', true)
+    early.close(1011)
+    await flush()
+    expect(posts2).toEqual([])
+  })
+})

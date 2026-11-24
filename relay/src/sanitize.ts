@@ -51,7 +51,7 @@ export function fromSlack(slackText: string): string {
   s = s.replace(/(^|[\s(（])_([^_\n]+)_(?=$|[\s.,!?;:)）。，！？；：])/g, '$1$2')
   s = s.replace(/(^|[\s(（])~([^~\n]+)~(?=$|[\s.,!?;:)）。，！？；：])/g, '$1$2')
   s = s.replace(/^&gt; ?/gm, '')
-  s = s.replace(/:[a-z0-9_+-]+:/g, '')
+  s = s.replace(/(^|[^\w:]):(?=[a-z0-9_+-]*[a-z+])[a-z0-9_+-]+:(?=$|[^\w:])/g, '$1')
   s = s.replace(/&lt;/g, '<').replace(/&gt;/g, '>').replace(/&amp;/g, '&')
   return clip(cleanText(s), MAX_INCOMING_CHARS)
 }

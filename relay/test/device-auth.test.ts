@@ -1,25 +1,27 @@
 import { describe, expect, it } from 'vitest'
-import { authenticateDevice } from '../src/device-auth'
+import { checkDeviceToken, deviceTokenConfigured, offeredDeviceProtocol } from '../src/device-auth'
 
 const TOKEN = 'a'.repeat(40)
 
-describe('authenticateDevice', () => {
-  it('accepts the token offered as a WebSocket subprotocol and echoes kg.v1', () => {
-    const h = new Headers({ 'Sec-WebSocket-Protocol': `kg.v1, kg-token.${TOKEN}` })
-    expect(authenticateDevice(h, TOKEN)).toEqual({ ok: true, protocol: 'kg.v1' })
+describe('device token', () => {
+  it('accepts only the configured token', () => {
+    expect(checkDeviceToken(TOKEN, TOKEN)).toBe('ok')
+    expect(checkDeviceToken('nope', TOKEN)).toBe('bad')
+    expect(checkDeviceToken(undefined, TOKEN)).toBe('bad')
+    expect(checkDeviceToken(42, TOKEN)).toBe('bad')
+    expect(checkDeviceToken('x'.repeat(300), TOKEN)).toBe('bad')
   })
 
-  it('accepts a bearer token for non-browser clients', () => {
-    expect(authenticateDevice(new Headers({ Authorization: `Bearer ${TOKEN}` }), TOKEN)).toEqual({ ok: true, protocol: null })
+  it('fails closed when DEVICE_TOKEN is unset or shorter than 32 chars', () => {
+    expect(checkDeviceToken('short', 'short')).toBe('not-configured')
+    expect(checkDeviceToken(TOKEN, undefined)).toBe('not-configured')
+    expect(deviceTokenConfigured(TOKEN)).toBe(true)
+    expect(deviceTokenConfigured('')).toBe(false)
   })
 
-  it('rejects a wrong or missing token with 401', () => {
-    expect(authenticateDevice(new Headers({ 'Sec-WebSocket-Protocol': 'kg.v1, kg-token.nope' }), TOKEN)).toMatchObject({ ok: false, status: 401 })
-    expect(authenticateDevice(new Headers(), TOKEN)).toMatchObject({ ok: false, status: 401 })
-  })
-
-  it('fails closed with 503 when DEVICE_TOKEN is unset or too short', () => {
-    expect(authenticateDevice(new Headers({ Authorization: 'Bearer ' }), undefined)).toMatchObject({ ok: false, status: 503 })
-    expect(authenticateDevice(new Headers({ Authorization: 'Bearer short' }), 'short')).toMatchObject({ ok: false, status: 503 })
+  it('only negotiates the public kg.v1 subprotocol; no token travels in the handshake', () => {
+    expect(offeredDeviceProtocol(new Headers({ 'Sec-WebSocket-Protocol': 'foo, kg.v1' }))).toBe('kg.v1')
+    expect(offeredDeviceProtocol(new Headers({ 'Sec-WebSocket-Protocol': 'foo' }))).toBeNull()
+    expect(offeredDeviceProtocol(new Headers())).toBeNull()
   })
 })

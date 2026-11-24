@@ -1,21 +1,32 @@
 import { timingSafeEqual } from './slack-verify'
 
 export const DEVICE_PROTOCOL = 'kg.v1'
-const TOKEN_PROTOCOL_PREFIX = 'kg-token.'
 export const MIN_DEVICE_TOKEN_LENGTH = 32
+export const AUTH_TIMEOUT_MS = 10_000
+export const MAX_TOKEN_LENGTH = 256
 
-export type DeviceAuth = { ok: true; protocol: string | null } | { ok: false; status: 401 | 503; reason: string }
+export function deviceTokenConfigured(token: string | undefined): token is string {
+  return !!token && token.length >= MIN_DEVICE_TOKEN_LENGTH
+}
 
-export function authenticateDevice(headers: Headers, deviceToken: string | undefined): DeviceAuth {
-  if (!deviceToken || deviceToken.length < MIN_DEVICE_TOKEN_LENGTH) return { ok: false, status: 503, reason: 'device-token-not-configured' }
-  const offered = (headers.get('Sec-WebSocket-Protocol') ?? '')
-    .split(',')
-    .map(s => s.trim())
-    .filter(Boolean)
-  const fromProtocol = offered.find(p => p.startsWith(TOKEN_PROTOCOL_PREFIX))?.slice(TOKEN_PROTOCOL_PREFIX.length)
-  const auth = headers.get('Authorization') ?? ''
-  const fromBearer = auth.startsWith('Bearer ') ? auth.slice(7).trim() : undefined
-  const presented = fromProtocol ?? fromBearer
-  if (!presented || !timingSafeEqual(presented, deviceToken)) return { ok: false, status: 401, reason: 'bad-device-token' }
-  return { ok: true, protocol: offered.includes(DEVICE_PROTOCOL) ? DEVICE_PROTOCOL : null }
+export type TokenCheck = 'ok' | 'not-configured' | 'bad'
+
+export function checkDeviceToken(presented: unknown, configured: string | undefined): TokenCheck {
+  if (!deviceTokenConfigured(configured)) return 'not-configured'
+  if (typeof presented !== 'string' || !presented || presented.length > MAX_TOKEN_LENGTH) return 'bad'
+  return timingSafeEqual(presented, configured) ? 'ok' : 'bad'
+}
+
+export function offeredDeviceProtocol(headers: Headers): string | null {
+  const offered = (headers.get('Sec-WebSocket-Protocol') ?? '').split(',').map(s => s.trim())
+  return offered.includes(DEVICE_PROTOCOL) ? DEVICE_PROTOCOL : null
+}
+
+export interface SocketAttachment {
+  authed: boolean
+  connectedAt: number
+}
+
+export function isAuthedAttachment(a: unknown): boolean {
+  return !!a && typeof a === 'object' && (a as SocketAttachment).authed === true
 }
