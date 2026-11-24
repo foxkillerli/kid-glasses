@@ -44,7 +44,7 @@ On a redeploy, do **not** resend the `v1` migration. Send migrations only when t
 | `src/hub.ts` | `RelayHub` Durable Object: WebSocket Hibernation API for devices (a per-socket attachment records `authed`), an alarm that closes sockets still unauthenticated after 10 s, SQLite-backed KV storage |
 | `src/hub-core.ts` | Hub logic, runtime-free so it can be tested: sessions, threads, history, ASR flow, fast lane |
 | `src/slack-verify.ts` | Slack signing-secret check (`v0:ts:body`, HMAC-SHA256, 5 min skew, constant-time compare) |
-| `src/slack-events.ts` | Event routing: `url_verification`; `message` in the Kid DM only; skips edits, deletes, hidden messages and Fox's own posts |
+| `src/slack-events.ts` | Event routing for the bot-DM model (see "Inbound rules") |
 | `src/slack-client.ts` | `chat.postMessage` with Fox's `xoxp-` token. It throws `ChannelNotAllowedError` for any channel except `KID_DM_CHANNEL_ID`, which must be a `D…` id, before any request is made |
 | `src/sanitize.ts` | Outgoing: `〔眼镜〕` prefix, Slack `& < >` escaping (no mentions can form), control-char removal, 1500-char cap. Incoming: Slack markup to plain lens text, 2000-char cap |
 | `src/deepgram.ts` | Streaming URL (`linear16`, 16 kHz, mono, `nova-3` + `multi`), result parsing, transcript joining (no spaces between CJK) |
@@ -52,6 +52,36 @@ On a redeploy, do **not** resend the `v1` migration. Send migrations only when t
 | `src/device-auth.ts` | Device token check, done on the first WebSocket frame and never in the handshake |
 | `src/protocol.ts` | Device message types and validation |
 | `src/fast-lane.ts` | Fast-answer lane: **off** unless `FAST_LANE_ENABLED="true"` **and** `FAST_LLM_KEY` is set. The answer function is a stub. |
+
+## Slack model (2026-11-25)
+
+- **Workspace:** Your Workspace (`T0000000000`).
+- **Fox:** the relay posts **as Fox** with his user token (`xoxp-`) into the DM between Fox and the **Kid bot**. Fox's user id (`U0000000000`) is not hardcoded; the relay resolves it lazily with `auth.test` and caches it.
+- **Kid:** replies as a bot in that DM, in-thread or top-level.
+- **Events:** the relay receives `message.im` as user events, which means for all of Fox's DMs. It considers only `KID_DM_CHANNEL_ID`.
+- **Waking Kid:** `chat.postMessage` with a user token into a bot DM needs no `as_user`. Whether such a post wakes Kid depends on how Kid's bot subscribes to events. That is outside the relay and will be checked end to end.
+
+## Inbound rules
+
+| Event in the Kid DM | Result |
+|---|---|
+| Plain message, `bot_message`, `me_message` from anyone but Fox | Forwarded to the glasses |
+| `thread_broadcast` | Forwarded once, with its `thread_ts` |
+| `file_share` | Text plus `[文件: name]`, or `[文件]` if the file has no name |
+| `message_changed` with new text | Appended as `（已修改）…`, with `edited: true` on the wire; history is not rewritten |
+| `message_changed` with the same text (e.g. unfurls) | Ignored |
+| `message_deleted` | Ignored |
+| Joins and other subtypes, hidden plain messages, empty text | Ignored |
+| Fox's own messages | Ignored: by `authorizations` user id in the router, by `auth.test` user id in the hub, and any text starting with `〔眼镜〕` |
+| Optional allowlist `KID_BOT_ID` (`B…`) / `KID_BOT_USER_ID` (`U…`) | Plain vars, not secrets. When either is set, only that sender is forwarded |
+
+The hub logs each new Kid sender pair once, as `kid sender user=… bot=…`. It logs ids only, never text, so the allowlist values can be read from the Worker's real-time logs.
+
+**Session matching.** When the first glasses post of a session opens a thread, the hub stores `thread:<ts> → session`.
+
+- A Kid reply with `thread_ts` goes to the session that owns that thread, even if a newer session has started.
+- A top-level reply goes to the active session, or to none once it has expired.
+- `msg` frames carry `session`.
 
 ## Configuration
 
@@ -67,6 +97,7 @@ Fox enters every secret himself, in the Cloudflare dashboard or with `wrangler s
 | `FAST_LLM_KEY` | secret, optional | Only used if the fast lane is enabled |
 | `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | var | Default `nova-3` / `multi`. If Mandarin accuracy is poor, try `language=zh-CN`. |
 | `FAST_LANE_ENABLED` | var | `"false"` |
+| `KID_BOT_ID` / `KID_BOT_USER_ID` | var, optional | Pin the Kid bot identity (see "Inbound rules") |
 
 `GET /health` reports which settings are present, as booleans only. Values are never echoed.
 
@@ -107,7 +138,7 @@ Each route fails closed when its secret is missing:
 |---|---|
 | `auth.ok` | Authentication accepted |
 | `hello` | Greeting, with `lastSeq` |
-| `msg` | A message, `from` = `kid` / `glasses` / `fast` |
+| `msg` | A message: `from` = `kid` / `glasses` / `fast`, plus `session`, and `edited` on edits |
 | `asr.partial` / `asr.final` | Live and final transcript |
 | `posted` | The message reached Slack |
 | `history` | A page of older messages |
@@ -155,7 +186,7 @@ Each finding has a regression test in `test/`. The round-2 fixes were verified b
 
 These are unverified or not built yet:
 
-- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. The router drops the installing user from `authorizations`. The hub also drops anything sent by the token's own user (looked up once with `auth.test`). The `〔眼镜〕` prefix is never used as a filter.
+- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. Fox is excluded three ways: the installing user from `authorizations` (router), the token owner from `auth.test` (hub), and any text starting with `〔眼镜〕`.
 - **Deepgram auth header.** It is not verified that an `Authorization` header passes through a Worker's outbound `fetch` WebSocket upgrade. The Cloudflare docs only show `Upgrade`. If it does not, Deepgram also accepts the key as a WebSocket subprotocol.
 - **ASR limits.** There is no limit on turn length and no `KeepAlive`. Deepgram closes a stream after about 10 s without audio. The device is expected to send `audio.stop` on release.
 - **Plugin client.** The M1 plugin client (device-side WebSocket, entering `DEVICE_TOKEN` on the phone, paging replies with `LENS_TEXT`) is not written yet.
