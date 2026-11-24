@@ -50,3 +50,24 @@ describe('KidDmClient channel allowlist', () => {
     await expect(new KidDmClient(TOKEN, KID, okFetch('D7777777777')).postToKid('x', null)).rejects.toBeInstanceOf(ChannelNotAllowedError)
   })
 })
+
+describe('KidDmClient.selfUserId', () => {
+  it("resolves the token's own user id with auth.test and caches it", async () => {
+    const f = vi.fn(async (_url: string, _init: RequestInit) => Response.json({ ok: true, user_id: 'UFOX0001' }))
+    const c = new KidDmClient(TOKEN, KID, f)
+    expect(await c.selfUserId()).toBe('UFOX0001')
+    expect(await c.selfUserId()).toBe('UFOX0001')
+    expect(f).toHaveBeenCalledOnce()
+    expect(f.mock.calls[0][0]).toBe('https://slack.com/api/auth.test')
+  })
+
+  it('returns null and retries later when the lookup fails', async () => {
+    const f = vi.fn(async (_url: string, _init: RequestInit) => Response.json({ ok: false, error: 'invalid_auth' }))
+    const c = new KidDmClient(TOKEN, KID, f)
+    expect(await c.selfUserId()).toBeNull()
+    await new Promise(r => setTimeout(r, 0))
+    expect(await c.selfUserId()).toBeNull()
+    expect(f).toHaveBeenCalledTimes(2)
+    expect(await new KidDmClient('xoxb-bot', KID, f).selfUserId()).toBeNull()
+  })
+})

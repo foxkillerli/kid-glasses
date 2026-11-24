@@ -9,6 +9,14 @@ export class FakeStorage implements KvStorage {
   async put<T>(key: string, value: T): Promise<void> {
     this.map.set(key, structuredClone(value))
   }
+  failNextPutAll = false
+  async putAll(entries: Record<string, unknown>): Promise<void> {
+    if (this.failNextPutAll) {
+      this.failNextPutAll = false
+      throw new Error('storage write failed')
+    }
+    for (const [k, v] of Object.entries(entries)) this.map.set(k, structuredClone(v))
+  }
   async delete(key: string): Promise<boolean> {
     return this.map.delete(key)
   }

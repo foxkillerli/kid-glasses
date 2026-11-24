@@ -24,7 +24,7 @@ export interface HubDeps {
   storage: KvStorage
   sockets: () => DeviceSocket[]
   deviceToken?: string
-  slack: { postToKid(text: string, threadTs: string | null): Promise<PostResult> }
+  slack: { postToKid(text: string, threadTs: string | null): Promise<PostResult>; selfUserId(): Promise<string | null> }
   asr: { connect(): Promise<AsrSocket> } | null
   fastLane: FastLane
   now: () => number
@@ -52,6 +52,7 @@ interface AsrTurn {
   pending: Array<ArrayBuffer | ArrayBufferView>
   stopRequested: boolean
   finished: boolean
+  resolve: (text: string | null) => void
 }
 
 export function isAuthed(ws: DeviceSocket): boolean {
@@ -66,6 +67,7 @@ export class HubCore {
   readonly history: HistoryStore
   private turn: AsrTurn | null = null
   private queue: Promise<unknown> = Promise.resolve()
+  private turnChain: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly deps: HubDeps) {
     this.history = new HistoryStore(deps.storage)
@@ -232,13 +234,16 @@ export class HubCore {
   async onKidMessage(msg: KidMessage): Promise<HistoryItem | null> {
     const seen = (await this.deps.storage.get<string[]>(SEEN_KEY)) ?? []
     if (seen.includes(msg.eventId)) return null
+    const nextSeen = [...seen, msg.eventId].slice(-SEEN_CAP)
+    const self = msg.user ? await this.deps.slack.selfUserId() : null
     const text = fromSlack(msg.text)
-    let item: HistoryItem | null = null
-    if (text) item = await this.history.append({ from: 'kid', text, slackTs: msg.ts, threadTs: msg.threadTs, at: this.deps.now() })
-    await this.deps.storage.put(SEEN_KEY, [...seen, msg.eventId].slice(-SEEN_CAP))
-    if (!item) return null
+    if ((self && msg.user === self) || !text) {
+      await this.deps.storage.put(SEEN_KEY, nextSeen)
+      return null
+    }
+    const item = await this.history.append({ from: 'kid', text, slackTs: msg.ts, threadTs: msg.threadTs, at: this.deps.now() }, { [SEEN_KEY]: nextSeen })
     this.broadcast({ t: 'msg', ...this.toWire(item) })
-    await this.enqueue(async () => {
+    void this.enqueue(async () => {
       const now = this.deps.now()
       const s = await this.deps.storage.get<Session>(SESSION_KEY)
       if (this.isLive(s, now)) await this.deps.storage.put(SESSION_KEY, { ...s, lastAt: now })
@@ -256,13 +261,18 @@ export class HubCore {
       return
     }
     if (this.recording) return
-    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false }
+    let resolve: (text: string | null) => void = () => {}
+    const result = new Promise<string | null>(r => (resolve = r))
+    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false, resolve }
     this.turn = turn
+    this.turnChain = this.turnChain.then(() => result).then(text => (text ? this.sayFromGlasses(text) : null)).catch(() => null)
     let socket: AsrSocket
     try {
       socket = await this.deps.asr.connect()
     } catch (err) {
       turn.finished = true
+      if (this.turn === turn) this.turn = null
+      turn.resolve(null)
       this.broadcast({ t: 'error', code: 'asr-connect-failed', message: String(err) })
       return
     }
@@ -274,11 +284,11 @@ export class HubCore {
       const { partial } = turn.assembler.feed(r)
       if (partial) this.broadcast({ t: 'asr.partial', text: partial })
     })
-    socket.addEventListener('close', () => {
-      void this.finishAsr(turn, turn.stopRequested)
+    socket.addEventListener('close', ev => {
+      this.finishAsr(turn, turn.stopRequested && ev.code === 1000)
     })
     socket.addEventListener('error', () => {
-      void this.finishAsr(turn, false)
+      this.finishAsr(turn, false)
     })
     for (const frame of turn.pending) socket.send(frame)
     turn.pending = []
@@ -301,21 +311,26 @@ export class HubCore {
       try {
         t.socket.send(CLOSE_STREAM)
       } catch {
-        void this.finishAsr(t, false)
+        this.finishAsr(t, false)
       }
     }
   }
 
-  private async finishAsr(t: AsrTurn, completed: boolean): Promise<void> {
+  get turnsSettled(): Promise<unknown> {
+    return this.turnChain
+  }
+
+  private finishAsr(t: AsrTurn, completed: boolean): void {
     if (t.finished) return
     t.finished = true
     if (this.turn === t) this.turn = null
     const text = t.assembler.finalText()
     if (!completed) {
       this.broadcast({ t: 'error', code: 'asr-interrupted', message: 'transcription ended early; nothing was sent' })
+      t.resolve(null)
       return
     }
     this.broadcast({ t: 'asr.final', text })
-    if (text) await this.sayFromGlasses(text)
+    t.resolve(text || null)
   }
 }

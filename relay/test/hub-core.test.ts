@@ -15,6 +15,7 @@ function setup(over: Partial<HubDeps> = {}) {
     storage: new FakeStorage(),
     sockets: () => [device],
     slack: {
+        selfUserId: async () => null,
       postToKid: vi.fn(async (text: string, threadTs: string | null) => {
         posts.push({ text, threadTs })
         return { ts: `1700000000.000${tsCounter++}`, channel: 'D0123ABCDEF' }
@@ -68,6 +69,7 @@ describe('HubCore', () => {
   it('reports Slack refusals to the device instead of posting', async () => {
     const { core, device } = setup({
       slack: {
+        selfUserId: async () => null,
         postToKid: async () => {
           throw new ChannelNotAllowedError('C123')
         },
@@ -144,6 +146,7 @@ describe('HubCore ordering', () => {
       storage,
       sockets: () => [device],
       slack: {
+        selfUserId: async () => null,
         postToKid: async (_text, threadTs) => {
           posts.push(threadTs)
           await new Promise(r => setTimeout(r, 5))
@@ -173,6 +176,7 @@ describe('HubCore review fixes', () => {
       sockets: () => devices,
       deviceToken: TOKEN,
       slack: {
+        selfUserId: async () => null,
         postToKid: async (text, threadTs) => {
           posts.push({ text, threadTs })
           return { ts: `9.${n++}`, channel: 'D0123ABCDEF' }
@@ -223,6 +227,7 @@ describe('HubCore review fixes', () => {
     const { c } = core(
       {
         slack: {
+        selfUserId: async () => null,
           postToKid: async (_t, threadTs) => {
             posts.push(threadTs)
             if (posts.length === 1) await new Promise<void>(r => (release = r))
@@ -299,5 +304,93 @@ describe('HubCore review fixes', () => {
     early.close(1011)
     await flush()
     expect(posts2).toEqual([])
+  })
+})
+
+describe('HubCore review round 2', () => {
+  function core2(over: Partial<HubDeps> = {}) {
+    const storage = new FakeStorage()
+    const device = new FakeDevice()
+    const posts: string[] = []
+    const c = new HubCore({
+      storage,
+      sockets: () => [device],
+      slack: {
+        selfUserId: async () => 'UFOX0001',
+        postToKid: async text => {
+          posts.push(text)
+          return { ts: `9.${posts.length}`, channel: 'D0123ABCDEF' }
+        },
+      },
+      asr: null,
+      fastLane: DISABLED_FAST_LANE,
+      now: () => 1,
+      ...over,
+    })
+    return { c, storage, device, posts }
+  }
+  const kid = (eventId: string, user = 'UKID0001', text = 'hi') => ({ eventId, channel: 'D0123ABCDEF', user, text, ts: '1', threadTs: null })
+
+  it('F2: history and the seen marker are written together, so a retry after a failed write stores the reply once', async () => {
+    const { c, storage } = core2()
+    storage.failNextPutAll = true
+    await expect(c.onKidMessage(kid('E1'))).rejects.toThrow('storage write failed')
+    await c.onKidMessage(kid('E1'))
+    await c.onKidMessage(kid('E1'))
+    const page = await c.history.page(null, 10)
+    expect(page.items.map(i => i.text)).toEqual(['hi'])
+  })
+
+  it('R2-1: storing a Kid reply does not wait for an in-flight Slack post', async () => {
+    let release: () => void = () => {}
+    const { c } = core2({
+      slack: {
+        selfUserId: async () => 'UFOX0001',
+        postToKid: () => new Promise(r => (release = () => r({ ts: '9.1', channel: 'D0123ABCDEF' }))),
+      },
+    })
+    const posting = c.sayFromGlasses('slow')
+    await flush()
+    const stored = await Promise.race([c.onKidMessage(kid('E2')).then(() => 'stored'), new Promise(r => setTimeout(() => r('blocked'), 20))])
+    expect(stored).toBe('stored')
+    release()
+    await posting
+  })
+
+  it("F7: Fox's own message is dropped by the token's own user id, whatever the authorizations say", async () => {
+    const { c, device } = core2()
+    expect(await c.onKidMessage(kid('E3', 'UFOX0001', '〔眼镜〕echo'))).toBeNull()
+    expect(await c.onKidMessage(kid('E4', 'UKID0001', '〔眼镜〕kid text'))).not.toBeNull()
+    expect(device.of('msg').map(m => m.text)).toEqual(['〔眼镜〕kid text'])
+  })
+
+  it('F5: a close other than 1000 after audio.stop is reported and not posted', async () => {
+    const asr = new FakeAsr()
+    const { c, device, posts } = core2({ asr: { connect: async () => asr } })
+    await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.start' }))
+    asr.result('一半', true)
+    await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    asr.close(1011)
+    await c.turnsSettled
+    expect(posts).toEqual([])
+    expect(device.of('error').map(m => m.code)).toEqual(['asr-interrupted'])
+  })
+
+  it('R2-2: transcripts are posted in the order the turns started, even if they finish out of order', async () => {
+    const first = new FakeAsr()
+    const second = new FakeAsr()
+    const queue = [first, second]
+    const { c, device, posts } = core2({ asr: { connect: async () => queue.shift() as FakeAsr } })
+    await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.start' }))
+    first.result('第一句', true)
+    await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.start' }))
+    second.result('第二句', true)
+    await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    second.close(1000)
+    await flush()
+    first.close(1000)
+    await c.turnsSettled
+    expect(posts).toEqual(['〔眼镜〕第一句', '〔眼镜〕第二句'])
   })
 })

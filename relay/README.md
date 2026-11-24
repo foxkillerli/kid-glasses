@@ -106,17 +106,28 @@ From the repo root, `npm run relay:test` does the same. Deployment will go throu
 
 ## Review
 
-- Round 1: a cross-family review (GPT) found one BLOCK and seven FIX_NEXT issues.
-  - The BLOCK: the device token travelled in the WebSocket handshake.
-  - The FIX_NEXT issues: Slack acked before the message was stored; session and thread races; replay capped at 50; overlapping or failed ASR turns; close code 1005; the prefix filter dropping Kid replies; emoji stripping eating `12:30:45`.
-- All eight are fixed and covered by `test/hub-core.test.ts` ("review fixes"), `test/hub.test.ts`, `test/router.test.ts`, `test/slack-events.test.ts` and `test/sanitize.test.ts`.
-- The reviewer's own 11 offline regression checks pass.
+Cross-family review (GPT diff-review):
+
+**Round 1:** 1 BLOCK and 7 FIX_NEXT, all fixed in `a3f3f82`.
+
+- The BLOCK: the device token travelled in the WebSocket handshake. It now goes in the first frame.
+- The FIX_NEXT issues: Slack acked before the message was stored; session and thread races; replay capped at 50; overlapping or failed ASR turns; close code 1005; the prefix filter dropping Kid replies; emoji stripping eating `12:30:45`.
+
+**Round 2:** confirmed F1, F3, F4, F6 and F8 fixed, with no new leak, auth bypass, or post outside the Kid DM. It flagged 5 FIX_NEXT, now fixed:
+
+- History entry and seen marker are written in one atomic `put`.
+- A Kid reply is stored without waiting for an in-flight Slack post.
+- An ASR close other than 1000 is never posted.
+- Transcripts post in the order their turns started.
+- Fox's own messages are identified by `auth.test` on the user token, not by `authorizations` or the prefix.
+
+Each finding has a regression test in `test/`. The round-2 fixes were verified by those tests only. They were not sent back for a third review.
 
 ## Known gaps
 
 These are unverified or not built yet:
 
-- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. The router drops Fox's own user id, taken from `authorizations`. The `〔眼镜〕` prefix is used only as a fallback when the payload names no installing user.
+- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. The router drops the installing user from `authorizations`. The hub also drops anything sent by the token's own user (looked up once with `auth.test`). The `〔眼镜〕` prefix is never used as a filter.
 - **Deepgram auth header.** It is not verified that an `Authorization` header passes through a Worker's outbound `fetch` WebSocket upgrade. The Cloudflare docs only show `Upgrade`. If it does not, Deepgram also accepts the key as a WebSocket subprotocol.
 - **ASR limits.** There is no limit on turn length and no `KeepAlive`. Deepgram closes a stream after about 10 s without audio. The device is expected to send `audio.stop` on release.
 - **Plugin client.** The M1 plugin client (device-side WebSocket, entering `DEVICE_TOKEN` on the phone, paging replies with `LENS_TEXT`) is not written yet.

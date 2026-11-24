@@ -64,6 +64,32 @@ export class KidDmClient {
     return { ts: data.ts, channel: data.channel ?? channel }
   }
 
+  private selfId: Promise<string | null> | null = null
+
+  selfUserId(): Promise<string | null> {
+    if (!this.selfId) {
+      this.selfId = this.lookupSelf()
+      this.selfId.then(id => {
+        if (!id) this.selfId = null
+      })
+    }
+    return this.selfId
+  }
+
+  private async lookupSelf(): Promise<string | null> {
+    if (!this.userToken || !this.userToken.startsWith('xoxp-')) return null
+    try {
+      const res = await this.fetchFn('https://slack.com/api/auth.test', {
+        method: 'POST',
+        headers: { Authorization: `Bearer ${this.userToken}` },
+      })
+      const data = (await res.json()) as { ok?: boolean; user_id?: string }
+      return data.ok && typeof data.user_id === 'string' ? data.user_id : null
+    } catch {
+      return null
+    }
+  }
+
   postToKid(text: string, threadTs: string | null): Promise<PostResult> {
     return this.postMessage(this.kidChannelId ?? '', text, threadTs)
   }

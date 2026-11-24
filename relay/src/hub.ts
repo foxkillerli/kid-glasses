@@ -35,7 +35,13 @@ export class RelayHub implements DurableObject {
   ) {
     const key = env.DEEPGRAM_API_KEY
     this.core = new HubCore({
-      storage: state.storage,
+      storage: {
+        get: <T>(key: string) => state.storage.get<T>(key),
+        put: <T>(key: string, value: T) => state.storage.put(key, value),
+        putAll: entries => state.storage.put(entries),
+        delete: key => state.storage.delete(key),
+        list: <T>(options: DurableObjectListOptions) => state.storage.list<T>(options),
+      },
       sockets: () => state.getWebSockets(),
       deviceToken: env.DEVICE_TOKEN,
       slack: new KidDmClient(env.SLACK_USER_TOKEN, env.KID_DM_CHANNEL_ID),

@@ -3,6 +3,7 @@ import type { Speaker } from './protocol'
 export interface KvStorage {
   get<T>(key: string): Promise<T | undefined>
   put<T>(key: string, value: T): Promise<void>
+  putAll(entries: Record<string, unknown>): Promise<void>
   delete(key: string): Promise<boolean>
   list<T>(options: { prefix?: string; start?: string; end?: string; reverse?: boolean; limit?: number }): Promise<Map<string, T>>
 }
@@ -31,11 +32,10 @@ export class HistoryStore {
     private readonly cap = HISTORY_CAP,
   ) {}
 
-  async append(item: Omit<HistoryItem, 'seq'>): Promise<HistoryItem> {
+  async append(item: Omit<HistoryItem, 'seq'>, alsoWrite: Record<string, unknown> = {}): Promise<HistoryItem> {
     const seq = ((await this.storage.get<number>(SEQ_KEY)) ?? 0) + 1
     const full = { ...item, seq }
-    await this.storage.put(key(seq), full)
-    await this.storage.put(SEQ_KEY, seq)
+    await this.storage.putAll({ ...alsoWrite, [key(seq)]: full, [SEQ_KEY]: seq })
     if (seq > this.cap) await this.storage.delete(key(seq - this.cap))
     return full
   }

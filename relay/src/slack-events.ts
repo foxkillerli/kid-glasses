@@ -1,5 +1,3 @@
-import { isFromGlasses } from './sanitize'
-
 export interface KidMessage {
   eventId: string
   channel: string
@@ -45,7 +43,6 @@ export function routeSlackEvent(body: unknown, kidChannelId: string | undefined)
   const installers = installerUserIds(b)
   if (user && installers.has(user)) return { kind: 'ignore', reason: 'own-message' }
   const text = typeof e.text === 'string' ? e.text : ''
-  if (installers.size === 0 && isFromGlasses(text)) return { kind: 'ignore', reason: 'own-message' }
   if (!text.trim()) return { kind: 'ignore', reason: 'empty' }
   if (typeof e.ts !== 'string') return { kind: 'ignore', reason: 'no-ts' }
   return {

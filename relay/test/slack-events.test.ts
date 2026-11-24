@@ -49,8 +49,8 @@ describe('routeSlackEvent', () => {
     expect(routeSlackEvent(msg({ user: 'UKID00001', text: '〔眼镜〕你刚才说的我收到了' }), KID).kind).toBe('kid-message')
   })
 
-  it('falls back to the prefix only when the payload names no installing user', () => {
-    expect(routeSlackEvent(msg({ text: '〔眼镜〕hi' }, { authorizations: [] }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+  it('never filters on the 〔眼镜〕 prefix, even without authorizations (the hub checks the sender id)', () => {
+    expect(routeSlackEvent(msg({ text: '〔眼镜〕hi' }, { authorizations: [] }), KID).kind).toBe('kid-message')
   })
 
   it('ignores everything when the Kid channel is not configured', () => {
