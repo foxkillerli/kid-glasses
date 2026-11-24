@@ -170,6 +170,10 @@ export class App {
           new TextContainerUpgrade({ containerID: box.id, containerName: box.name, content: box.content }),
         ),
     })
+    this.display.onRebuildFailed = key => {
+      this.note(`rebuild ${key} failed (${this.display.lastError || 'false'}), will retry`)
+      if (this.pendingKey === key) this.pendingKey = ''
+    }
     this.ws = new WsProbe({
       url: WS_URL,
       pingEveryMs: WS_PING_MS,
@@ -211,7 +215,10 @@ export class App {
   }
 
   private installLifecycleLogging(): void {
-    document.addEventListener('visibilitychange', () => this.note(`visibility=${document.visibilityState}`))
+    document.addEventListener('visibilitychange', () => {
+      this.note(`visibility=${document.visibilityState}`)
+      if (document.visibilityState === 'visible') this.forceRedraw()
+    })
     window.addEventListener('pagehide', e => this.note(`pagehide persisted=${(e as PageTransitionEvent).persisted}`))
     window.addEventListener('pageshow', e => this.note(`pageshow persisted=${(e as PageTransitionEvent).persisted}`))
     document.addEventListener('freeze', () => this.note('freeze'))
@@ -318,6 +325,11 @@ export class App {
 
   private pendingKey = ''
 
+  private forceRedraw(): void {
+    this.pendingKey = ''
+    this.render()
+  }
+
   private refresh(): void {
     const key = this.layoutKey()
     if (this.pendingKey !== key) return this.render()
@@ -377,6 +389,7 @@ export class App {
       lines.push(`bytes ${m.acc.totalBytes}  frames ${m.acc.frames}`)
       lines.push(`${levelBar(db)} ${formatDb(db)}dB`)
       lines.push(`rms ${Math.round(m.acc.lastFrameRms)}  wall ${((Date.now() - m.startedAt) / 1000).toFixed(1)}s`)
+      lines.push(`audioControl -> ${m.lastControl}`)
     } else {
       lines.push(`○ idle  src: ${src}`)
       lines.push(`audioControl -> ${m.lastControl}`)
@@ -409,7 +422,7 @@ export class App {
   private mirrorExtra(): string {
     const lines = [
       `events seen: ${this.eventsSeen}  last gesture: ${this.lastGesture}`,
-      `display writes: ${this.display.writes}  failures: ${this.display.failures} ${this.display.lastError}`,
+      `display writes: ${this.display.writes}  failures: ${this.display.failures}  timeouts: ${this.display.timeouts} ${this.display.lastError}`,
       '',
       this.bgBody(0),
       '',
@@ -474,7 +487,7 @@ export class App {
           this.note('fgEnter while recording -> re-arm audioControl')
           void this.bridge.audioControl(true, this.mic.source).then(r => this.note(`re-arm audioControl -> ${r}`))
         }
-        this.render()
+        this.forceRedraw()
         return
       case 'fgExit':
         this.kv.setItem('kg.hb', JSON.stringify(this.hb))
@@ -551,6 +564,7 @@ export class App {
     m.startedAt = Date.now()
     m.acc = new PcmAccumulator(120)
     m.framesWhileIdle = 0
+    m.lastControl = 'pending'
     this.render()
     let r: unknown
     try {

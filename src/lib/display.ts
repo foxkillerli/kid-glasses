@@ -44,11 +44,38 @@ export class DisplayQueue {
   private pendingUpgrades = new Map<number, { id: number; name: string; content: string }>()
   private busy = false
   private current: Layout | null = null
+  private inflight: Layout | null = null
   writes = 0
   failures = 0
   lastError = ''
+  timeouts = 0
+  onRebuildFailed: ((key: string) => void) | null = null
 
-  constructor(private readonly sink: DisplaySink) {}
+  constructor(
+    private readonly sink: DisplaySink,
+    private readonly timeoutMs = 3000,
+  ) {}
+
+  private withTimeout(p: Promise<boolean>): Promise<boolean> {
+    return new Promise(resolve => {
+      const timer = setTimeout(() => {
+        this.timeouts++
+        this.lastError = `timeout ${this.timeoutMs}ms`
+        resolve(false)
+      }, this.timeoutMs)
+      p.then(
+        v => {
+          clearTimeout(timer)
+          resolve(v)
+        },
+        err => {
+          clearTimeout(timer)
+          this.lastError = String(err)
+          resolve(false)
+        },
+      )
+    })
+  }
 
   get layout(): Layout | null {
     return this.current
@@ -61,7 +88,7 @@ export class DisplayQueue {
   }
 
   setText(id: number, content: string): void {
-    const target = this.pendingRebuild ?? this.current
+    const target = this.pendingRebuild ?? this.inflight ?? this.current
     const box = target?.boxes.find(b => b.id === id)
     if (!box) return
     const clamped = clampToLimit(content, this.pendingRebuild ? LIMIT_REBUILD : LIMIT_UPGRADE)
@@ -98,10 +125,15 @@ export class DisplayQueue {
         let ok = false
         try {
           if (job.kind === 'rebuild') {
-            ok = await this.sink.rebuild(job.layout)
+            this.inflight = job.layout
+            try {
+              ok = await this.withTimeout(this.sink.rebuild(job.layout))
+            } finally {
+              this.inflight = null
+            }
             if (ok) this.current = job.layout
           } else {
-            ok = await this.sink.upgrade(job)
+            ok = await this.withTimeout(this.sink.upgrade(job))
             const box = this.current?.boxes.find(b => b.id === job.id)
             if (ok && box) box.content = job.content
           }
@@ -109,7 +141,10 @@ export class DisplayQueue {
           this.lastError = String(err)
         }
         this.writes++
-        if (!ok) this.failures++
+        if (!ok) {
+          this.failures++
+          if (job.kind === 'rebuild') this.onRebuildFailed?.(job.layout.key)
+        }
       }
     } finally {
       this.busy = false

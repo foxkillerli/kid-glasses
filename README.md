@@ -77,9 +77,13 @@ A packaged `.ehpk` can only reach a phone by uploading it to the Even Hub portal
 5. Open the **Even Hub** tab. A developer section appears top-right. Tap **Scan QR** and scan the QR.
 6. The plugin opens on the glasses. Double-tap on the menu brings up the system exit dialog.
 
-If the phone shows "Couldn't connect", the desktop firewall is the first suspect. `ufw` is active on this machine; allow the port with `sudo ufw allow from <LAN-SUBNET> to any port 5173 proto tcp`.
+**Firewall (required on this desktop):** `ufw` is active with `DEFAULT_INPUT_POLICY="DROP"`, and none of its 52 rules in `/etc/ufw/user.rules` open 5173 (checked 2026-11-24). Without this rule the phone gets "Couldn't connect":
 
-To stop the server: `kill "$(cat .dev/server.pid)"`.
+```bash
+sudo ufw allow from <LAN-SUBNET> to any port 5173 proto tcp comment 'kid-glasses dev'
+```
+
+To stop the server: `kill -- -"$(cat .dev/server.pid)"`. The script starts it with `setsid`, so the pid is also the process-group id. Run `scripts/serve-lan.sh` again to restart it.
 
 ## Gestures
 
