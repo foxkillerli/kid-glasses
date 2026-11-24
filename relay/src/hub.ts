@@ -5,6 +5,7 @@ import { fastLaneFor } from './fast-lane'
 import { CLOSE_UNAUTHORIZED, HubCore, isAuthed, type AsrSocket } from './hub-core'
 import type { KidMessage } from './slack-events'
 import { KidDmClient } from './slack-client'
+import { KidWebhookClient, kidWebhookConfigured } from './kid-webhook'
 
 export const PROTOCOL_HEADER = 'X-KG-Protocol'
 const OPEN = 1
@@ -47,6 +48,7 @@ export class RelayHub implements DurableObject {
       slack: new KidDmClient(env.SLACK_USER_TOKEN, env.KID_DM_CHANNEL_ID),
       asr: key ? { connect: async () => asAsrSocket(await connectDeepgram(buildListenUrl({ model: env.DEEPGRAM_MODEL, language: env.DEEPGRAM_LANGUAGE }), key)) } : null,
       fastLane: fastLaneFor(env),
+      kidWebhook: kidWebhookConfigured(env.KID_WEBHOOK_URL, env.KID_WEBHOOK_SECRET) ? new KidWebhookClient(env.KID_WEBHOOK_URL as string, env.KID_WEBHOOK_SECRET as string) : null,
       now: () => Date.now(),
       log: m => console.log(`[hub] ${m}`),
     })

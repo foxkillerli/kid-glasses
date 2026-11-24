@@ -4,6 +4,7 @@ import { HubCore, SESSION_IDLE_MS, type HubDeps } from '../src/hub-core'
 import { CLOSE_STREAM } from '../src/deepgram'
 import { ChannelNotAllowedError } from '../src/slack-client'
 import type { KidMessage } from '../src/slack-events'
+import type { KidWebhook, KidWebhookPayload, KidWebhookResult } from '../src/kid-webhook'
 import { FakeAsr, FakeDevice, FakeStorage, flush } from './fakes'
 
 function setup(over: Partial<HubDeps> = {}) {
@@ -561,3 +562,84 @@ describe('HubCore bot-DM review fixes', () => {
   })
 })
 
+
+describe('HubCore Kid webhook', () => {
+  function core5(hook: KidWebhook | null, opts: { failPost?: boolean } = {}) {
+    let now = 1_000_000
+    let n = 0
+    const device = new FakeDevice()
+    const logs: string[] = []
+    const c = new HubCore({
+      storage: new FakeStorage(),
+      sockets: () => [device],
+      slack: {
+        selfUserId: async () => 'UFOX0001',
+        postToKid: async () => {
+          if (opts.failPost) throw new ChannelNotAllowedError('C1')
+          return { ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }
+        },
+      },
+      asr: null,
+      fastLane: DISABLED_FAST_LANE,
+      kidWebhook: hook,
+      now: () => now,
+      log: m => logs.push(m),
+    })
+    return { c, device, logs, advance: (ms: number) => (now += ms) }
+  }
+  const recordingHook = (result: KidWebhookResult = { ok: true, status: 200, attempts: 1 }) => {
+    const payloads: KidWebhookPayload[] = []
+    return { payloads, hook: { notify: async (p: KidWebhookPayload) => (payloads.push(p), result) } }
+  }
+
+  it('sends the transcript without the 〔眼镜〕 prefix; thread_ts stays for the session while message_ts is new', async () => {
+    const { payloads, hook } = recordingHook()
+    const { c, device, advance } = core5(hook)
+    await c.sayFromGlasses('今天 几点放学 <b>&')
+    advance(1000)
+    await c.sayFromGlasses('还有作业吗')
+    advance(SESSION_IDLE_MS + 1)
+    await c.sayFromGlasses('新会话')
+    expect(payloads.map(p => [p.thread_ts, p.message_ts, p.text])).toEqual([
+      ['1700000000.000', '1700000000.000', '今天 几点放学 <b>&'],
+      ['1700000000.000', '1700000000.001', '还有作业吗'],
+      ['1700000000.002', '1700000000.002', '新会话'],
+    ])
+    expect(payloads[0]).toMatchObject({ v: 1, source: 'kid-glasses', channel: 'D0123ABCDEF', at: 1_000_000 })
+    expect(payloads[0].session).toBe(payloads[1].session)
+    expect(payloads[2].session).not.toBe(payloads[0].session)
+    expect(payloads.every(p => !p.text.includes('〔眼镜〕'))).toBe(true)
+    expect(device.of('kid-webhook').map(m => m.result)).toEqual(['ok', 'ok', 'ok'])
+  })
+
+  it('a webhook failure keeps the Slack post and history, and tells the device without leaking config', async () => {
+    const { hook } = recordingHook({ ok: false, status: 502, attempts: 2 })
+    const { c, device, logs } = core5(hook)
+    const item = await c.sayFromGlasses('hi')
+    expect(item).not.toBeNull()
+    expect(device.of('posted')).toHaveLength(1)
+    expect(device.of('kid-webhook')).toEqual([{ t: 'kid-webhook', seq: 1, result: 'failed', status: 502 }])
+    expect(device.of('error')).toEqual([{ t: 'error', code: 'kid-webhook-failed', message: 'kid webhook failed (502)' }])
+    expect(logs.join('\n')).not.toMatch(/https?:|example/)
+  })
+
+  it('a throwing webhook is treated as a network failure, not a crash', async () => {
+    const { c, device } = core5({ notify: async () => { throw new Error('boom https://secret.example') } })
+    expect(await c.sayFromGlasses('hi')).not.toBeNull()
+    expect(device.of('error')).toEqual([{ t: 'error', code: 'kid-webhook-failed', message: 'kid webhook failed (network)' }])
+  })
+
+  it('without a webhook, keeps post-only behaviour and reports skipped', async () => {
+    const { c, device } = core5(null)
+    expect(await c.sayFromGlasses('hi')).not.toBeNull()
+    expect(device.of('kid-webhook')).toEqual([{ t: 'kid-webhook', seq: 1, result: 'skipped', status: null }])
+    expect(device.of('error')).toEqual([])
+  })
+
+  it('does not call the webhook when the Slack post fails', async () => {
+    const { payloads, hook } = recordingHook()
+    const { c } = core5(hook, { failPost: true })
+    expect(await c.sayFromGlasses('hi')).toBeNull()
+    expect(payloads).toEqual([])
+  })
+})

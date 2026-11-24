@@ -1,9 +1,10 @@
 import { CLOSE_STREAM, TranscriptAssembler, parseDeepgramMessage } from './deepgram'
 import { checkDeviceToken, isAuthedAttachment, type SocketAttachment } from './device-auth'
 import type { FastLane } from './fast-lane'
+import type { KidWebhook } from './kid-webhook'
 import { HistoryStore, PAGE_MAX, type HistoryItem, type KvStorage } from './history'
 import { parseClientMessage, type ServerMessage } from './protocol'
-import { cleanText, fromSlack, isFromGlasses, toSlack } from './sanitize'
+import { MAX_OUTGOING_CHARS, clip, cleanText, fromSlack, isFromGlasses, toSlack } from './sanitize'
 import type { KidMessage } from './slack-events'
 import type { PostResult } from './slack-client'
 
@@ -27,6 +28,7 @@ export interface HubDeps {
   slack: { postToKid(text: string, threadTs: string | null): Promise<PostResult>; selfUserId(): Promise<string | null> }
   asr: { connect(): Promise<AsrSocket> } | null
   fastLane: FastLane
+  kidWebhook?: KidWebhook | null
   now: () => number
   log?: (message: string) => void
 }
@@ -238,6 +240,7 @@ export class HubCore {
       at: this.deps.now(),
     })
     this.broadcast({ t: 'posted', seq: item.seq, text: item.text })
+    await this.notifyKid(next, posted, item)
     if (this.deps.fastLane.enabled) {
       const answer = await this.deps.fastLane.answer(item.text)
       if (answer) {
@@ -246,6 +249,38 @@ export class HubCore {
       }
     }
     return item
+  }
+
+  private async notifyKid(session: Session, posted: PostResult, item: HistoryItem): Promise<void> {
+    const hook = this.deps.kidWebhook
+    if (!hook) {
+      this.broadcast({ t: 'kid-webhook', seq: item.seq, result: 'skipped', status: null })
+      return
+    }
+    let result
+    try {
+      result = await hook.notify({
+        v: 1,
+        source: 'kid-glasses',
+        session: session.id,
+        channel: posted.channel,
+        thread_ts: session.threadTs ?? posted.ts,
+        message_ts: posted.ts,
+        text: clip(item.text, MAX_OUTGOING_CHARS),
+        at: this.deps.now(),
+      })
+    } catch {
+      result = { ok: false as const, status: null, attempts: 0 }
+    }
+    if (result.ok) {
+      this.log(`kid webhook ok status=${result.status} attempts=${result.attempts}`)
+      this.broadcast({ t: 'kid-webhook', seq: item.seq, result: 'ok', status: result.status })
+      return
+    }
+    const status = result.status === null ? 'network' : String(result.status)
+    this.log(`kid webhook failed status=${status} attempts=${result.attempts}`)
+    this.broadcast({ t: 'kid-webhook', seq: item.seq, result: 'failed', status: result.status })
+    this.broadcast({ t: 'error', code: 'kid-webhook-failed', message: `kid webhook failed (${status})` })
   }
 
   onKidMessage(msg: KidMessage): Promise<HistoryItem | null> {

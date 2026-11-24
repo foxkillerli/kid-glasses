@@ -1,3 +1,5 @@
+import { kidWebhookConfigured } from './kid-webhook'
+
 export interface Env {
   HUB: DurableObjectNamespace
   SLACK_USER_TOKEN?: string
@@ -11,6 +13,8 @@ export interface Env {
   FAST_LANE_ENABLED?: string
   KID_BOT_ID?: string
   KID_BOT_USER_ID?: string
+  KID_WEBHOOK_URL?: string
+  KID_WEBHOOK_SECRET?: string
 }
 
 export interface ConfigStatus {
@@ -21,6 +25,7 @@ export interface ConfigStatus {
   deviceToken: boolean
   fastLane: boolean
   kidAllowlist: boolean
+  kidWebhook: boolean
 }
 
 export function configStatus(env: Env): ConfigStatus {
@@ -32,5 +37,6 @@ export function configStatus(env: Env): ConfigStatus {
     deviceToken: (env.DEVICE_TOKEN?.length ?? 0) >= 32,
     fastLane: env.FAST_LANE_ENABLED === 'true' && !!env.FAST_LLM_KEY,
     kidAllowlist: !!(env.KID_BOT_ID || env.KID_BOT_USER_ID),
+    kidWebhook: kidWebhookConfigured(env.KID_WEBHOOK_URL, env.KID_WEBHOOK_SECRET),
   }
 }

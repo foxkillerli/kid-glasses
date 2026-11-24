@@ -5,7 +5,7 @@ export const MAX_INCOMING_CHARS = 2000
 const CONTROL = /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f-\u009f]/g
 const INVISIBLE = /[​-‏‪-‮⁠-⁤﻿]/g
 
-function clip(s: string, max: number): string {
+export function clip(s: string, max: number): string {
   const chars = Array.from(s)
   return chars.length > max ? chars.slice(0, max - 1).join('') + '…' : s
 }

@@ -20,6 +20,7 @@ export type ServerMessage =
   | { t: 'asr.partial'; text: string }
   | { t: 'asr.final'; text: string }
   | { t: 'posted'; seq: number; text: string }
+  | { t: 'kid-webhook'; seq: number; result: 'ok' | 'skipped' | 'failed'; status: number | null }
   | { t: 'history'; items: Array<{ seq: number; from: Speaker; text: string; at: number; session: string | null; edited?: boolean }>; more: boolean }
   | { t: 'error'; code: string; message: string }
 
