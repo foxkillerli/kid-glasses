@@ -200,7 +200,7 @@ Screenshots: `docs/screenshots/`.
   - `WsProbe`-style reconnect (3 s) with id-matched pings.
   - The whitelist must gain the relay origin (`https://` and `wss://`) once it is deployed.
 - **Lifecycle:** the localStorage ring log and boot counter, kept as a field diagnostic.
-- **Relay design** (scaffold in `relay/`, not deployed): Cloudflare Worker + Durable Object, Slack DM loop with Fox's user token restricted to the Kid DM channel, Deepgram streaming, and a fast-answer lane that is off by default. Fox's steps are in `docs/M1-FOX-SETUP.md`.
+- **Relay design** (`relay/`, deployed 2026-11-25 as `kid-glasses-relay` with no secrets): Cloudflare Worker + Durable Object, Slack DM loop with Fox's user token restricted to the Kid DM channel, Deepgram streaming, and a fast-answer lane that is off by default. Fox's steps are in `docs/M1-FOX-SETUP.md`.
 
 ## Open questions
 

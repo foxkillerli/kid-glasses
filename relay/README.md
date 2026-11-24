@@ -1,11 +1,39 @@
-# kid-glasses relay (M1 scaffold)
+# kid-glasses relay (M1)
 
 This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 plugin to Slack:
 
 - **Glasses → Kid.** Speech, or typed text, is posted into the Kid DM channel as Fox, using Fox's user token. Each post starts with `〔眼镜〕`.
 - **Kid → glasses.** Kid's replies in that DM are pushed back to the glasses.
 
-**Status: not deployed.** No Cloudflare resources exist for it yet. Fox's setup steps are in [`../docs/M1-FOX-SETUP.md`](../docs/M1-FOX-SETUP.md).
+**Status: deployed 2026-11-25, no secrets set.**
+
+- URL: <https://kid-glasses-relay.your-subdomain.workers.dev>
+- Slack Events request URL: `https://kid-glasses-relay.your-subdomain.workers.dev/slack/events`
+- Worker: `kid-glasses-relay`, Workers Free plan, workers.dev only.
+- Durable Object namespace: `kid-glasses-relay_RelayHub`, class `RelayHub`, SQLite storage. Migration `v1` (`new_sqlite_classes`) is applied.
+- Plain-text vars only: `DEEPGRAM_MODEL=nova-3`, `DEEPGRAM_LANGUAGE=multi`, `FAST_LANE_ENABLED=false`.
+
+Fox's setup steps are in [`../docs/M1-FOX-SETUP.md`](../docs/M1-FOX-SETUP.md).
+
+### How it was deployed
+
+There was no `wrangler login`; the deploy went through the Cloudflare MCP:
+
+1. Bundle locally:
+
+   ```bash
+   node_modules/.bin/esbuild relay/src/index.ts --bundle --format=esm --platform=neutral --target=es2022 --minify --outfile=$TMPDIR/relay/index.js
+   ```
+
+2. Pass the file to the MCP as base64. Inside the MCP, check its sha256 before uploading.
+3. `PUT /accounts/{id}/workers/scripts/kid-glasses-relay`, multipart, with this metadata:
+   - `main_module: index.js`
+   - `compatibility_date: 2026-11-01`
+   - bindings: `durable_object_namespace HUB → RelayHub`, plus the three `plain_text` vars
+   - `migrations: {new_tag: "v1", new_sqlite_classes: ["RelayHub"]}`
+4. Enable the workers.dev route: `POST …/subdomain {enabled: true}`.
+
+On a redeploy, do **not** resend the `v1` migration. Send migrations only when the classes change. Redeploying the script does not touch secrets Fox has set.
 
 ## Layout
 

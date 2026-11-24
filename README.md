@@ -2,7 +2,7 @@
 
 An Even Realities G2 plugin for Even Hub. The end goal is a voice "Kid panel": voice in → relay → Slack → Fox's assistant bot → text back on the lenses.
 
-**M0 (this milestone) only probes what the device can do.** It has no Slack, Deepgram or secrets of any kind. Its only Cloudflare use is static hosting of the test build plus a WebSocket echo (see below). The M1 relay scaffold lives in `relay/` and is not deployed.
+**M0 (this milestone) only probes what the device can do.** It has no Slack, Deepgram or secrets of any kind. Its only Cloudflare use is static hosting of the test build plus a WebSocket echo (see below). The M1 relay lives in `relay/`. It is deployed at <https://kid-glasses-relay.your-subdomain.workers.dev> with no secrets yet.
 
 | Page | What it probes |
 |---|---|
@@ -155,7 +155,7 @@ All requests are same-origin. Static assets also carry `Access-Control-Allow-Ori
 
 M1 will deploy the relay to **Cloudflare Workers + a Durable Object**, through claude-relay's already-authorized Cloudflare MCP (no `wrangler login`).
 
-- The scaffold is in `relay/`. Nothing in it is deployed yet, and no Cloudflare resources have been created for it.
+- The relay code is in `relay/`. It was deployed on 2026-11-25 as Worker `kid-glasses-relay` with a SQLite Durable Object `RelayHub`. No secrets are set; Fox enters them.
 - M0's only Cloudflare footprint is the static test host `kid-glasses-m0`: no bindings, no secrets.
 - Secrets (Slack, Deepgram and so on) are entered only by Fox, never committed. Fox's steps are in `docs/M1-FOX-SETUP.md`.
 
