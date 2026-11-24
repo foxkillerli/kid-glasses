@@ -2,7 +2,7 @@
 
 An Even Realities G2 plugin for Even Hub. The end goal is a voice "Kid panel": voice in → relay → Slack → Fox's assistant bot → text back on the lenses.
 
-**M0 (this milestone) only probes what the device can do.** It has no Slack, Cloudflare, Deepgram or secrets of any kind.
+**M0 (this milestone) only probes what the device can do.** It has no Slack, Deepgram or secrets of any kind. Its only Cloudflare use is static hosting of the test build plus a WebSocket echo (see below). The M1 relay scaffold lives in `relay/` and is not deployed.
 
 | Page | What it probes |
 |---|---|
@@ -10,7 +10,7 @@ An Even Realities G2 plugin for Even Hub. The end goal is a voice "Kid panel": v
 | 1. Glyph test (CJK) | 480 common hanzi in rows with indices (`001`, `021`, …); punctuation `P01..P30`; full-/half-width pairs `W01..W31`; mixed CN/EN/digits `M01..M08`; rare chars and symbols `R01..R32`. Every sample sits in `[ ]`, so a dropped glyph shows as empty brackets |
 | 2. Page capacity | Self-describing rulers for Chinese chars per line (十=10 廿=20 卅=30 卌=40), English chars per line (digit at every 10th position), a mixed paragraph, and numbered lines for lines per page (full-screen and body area) |
 | 3. Mic capture | `audioControl(true, AudioInputSource.Glasses)` with hold-to-record (LONG_PRESS 9 / RELEASE 10) and a tap toggle as fallback. **Glasses mic only**: there is no phone-mic option and no `getUserMedia`. Shows `src: glasses`, frames, bytes, duration (16 kHz s16le mono), RMS bar plus dBFS, the per-frame `source` / `direction` after SDK normalisation (a missing source becomes `glasses`) plus the host's raw fields as `host: …`, the `audioControl` return value, and the device `conn` / `wear` / `bat` state. If no frame arrives within 3 s it shows `!! NO AUDIO FRAMES - check wear / connection` (or `AUDIO STALLED` if frames stop). The last clip is kept in memory as `Int16Array` |
-| 4. Background probe | 1 s heartbeat (ticks vs. wall-clock expected, largest gap) and a WebSocket echo ping every 5 s to `wss://echo.websocket.org`. Lifecycle events go into a 1000-entry localStorage ring buffer, which also counts reloads (`boot #n`) |
+| 4. Background probe | 1 s heartbeat (ticks vs. wall-clock expected, largest gap) and a WebSocket echo ping every 5 s to the same-origin `wss://<host>/echo` on the hosted build (local dev falls back to `wss://echo.websocket.org`). Lifecycle events go into a 1000-entry localStorage ring buffer, which also counts reloads (`boot #n`) |
 
 The phone screen (WebView) mirrors the current lens text in a monospace box and shows the log. Use it as the reference when you check which glyphs are missing on the lens.
 
@@ -50,7 +50,24 @@ scripts/sim.sh console
 
 `shot` writes `docs/screenshots/my-shot.png`, composited on black.
 
-The simulator screenshots in `docs/screenshots/` use the **simulator's** font. Glyph coverage and capacity numbers have to be re-read on the real lenses.
+The simulator screenshots in `docs/screenshots/` use the **simulator's** font.
+
+## Lens text capacity
+
+`src/lib/lens-text.ts` has the single config constant `LENS_TEXT`, which all pagination uses:
+
+| Field | Value | Source |
+|---|---|---|
+| `zhCharsPerLine` | 28 | Simulator, Cap ZH ruler |
+| `enCharsPerLine` | 52 | Simulator, the lower of the two EN rulers (abc 59, xxx 52) |
+| `bodyLines` | 8 | Simulator, Lines body page |
+| `fullScreenLines` | 10 | Simulator, Lines full page |
+| `pageMaxBytes` | 900 | Margin under the 1000-byte create/rebuild limit |
+
+- Fox checked these on the real lenses and judged them OK, but did not measure them precisely.
+- `wrapForLens` counts a wide char (CJK, fullwidth, kana, hangul, emoji) as 1/28 of a line and any other char as 1/52.
+- `paginateForLens` splits text into pages of `bodyLines` lines.
+- Known risk: runs of capitals or digits are wider than `x` in the font. In the pretext model, 52 × `W` is 832 px against a 568 px line, so all-caps text can wrap on the lens earlier than the counter predicts.
 
 ## Build / package
 
@@ -138,9 +155,41 @@ All requests are same-origin. Static assets also carry `Access-Control-Allow-Ori
 
 M1 will deploy the relay to **Cloudflare Workers + a Durable Object**, through claude-relay's already-authorized Cloudflare MCP (no `wrangler login`).
 
-- **M0 deploys nothing to Cloudflare.**
-- Secrets (Slack, STT and so on) are entered only by Fox, never committed. M0 has none.
+- The scaffold is in `relay/`. Nothing in it is deployed yet, and no Cloudflare resources have been created for it.
+- M0's only Cloudflare footprint is the static test host `kid-glasses-m0`: no bindings, no secrets.
+- Secrets (Slack, Deepgram and so on) are entered only by Fox, never committed. Fox's steps are in `docs/M1-FOX-SETUP.md`.
 
 ## Real-device test plan
 
-Batch 1 (background probe, mic prompt) is recorded in `docs/M0-REPORT.md` under "Device results". The batch-2 checklist of numbers to report (mic frames / source / direction / no-audio warning, glyphs, capacity, long background, lock screen) is the table in that section.
+Run on iPhone + G2 through QR dev mode against the hosted build. Record the results in `docs/M0-REPORT.md`, "Device results".
+
+**Setup**
+
+- [ ] Note the Even App version and the glasses battery level.
+- [ ] Close the plugin completely, reopen it, and confirm the build: on the mic page the hint reads `hold: rec  tap: toggle  2tap: menu`.
+
+**Glyphs (page 1)**
+
+- [ ] Swipe through every Hanzi page. Note the index (`001`, `021`, …) of any row with a missing or garbled glyph.
+- [ ] On the Punct / Full-half / Mixed / Rare pages, note every sample id whose brackets are empty (`P07[]`) or show a box.
+
+**Capacity (page 2)**
+
+- [ ] Cap ZH: the last ruler mark (十 / 廿 / 卅) visible on the first line, which gives Chinese chars per line. The simulator shows 28.
+- [ ] Cap EN: the last digit visible on the abc and xxx rulers. The simulator shows 59 and 52.
+- [ ] Lines full and Lines body: the last line number visible. The simulator shows 10 and 8.
+
+**Mic (page 3), glasses only**
+
+- [ ] Hold 3–5 s, then release. Note `frames`, `bytes`, duration, `audioControl open -> …`, `ev src … dir …` and the full `host: …` line.
+- [ ] Note whether an iOS microphone prompt appears at the first recording.
+- [ ] Tap to start, tap to stop: the same readings.
+- [ ] RMS silent vs. talking.
+- [ ] Physical check: with the phone in another room or its mic covered, speak near the glasses or tap the frame. Does RMS jump?
+- [ ] Take the glasses off (`wear false`) and record. Does `!! NO AUDIO FRAMES` appear within 3 s?
+
+**Background (page 4)**
+
+- [ ] Foreground for 2 min: ticks vs. expected, lost, max gap, WS pong count.
+- [ ] Switch to another app for 30 s, 5 min and 30 min, then return. Note `boot #`, ticks / lost / max gap, WS reconnects, and the log lines around `visibility=hidden`.
+- [ ] Lock the phone for 5 min with the plugin open, unlock, and note the same readings.

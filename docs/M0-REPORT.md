@@ -1,6 +1,21 @@
-# M0 report: G2 device-capability probes (draft)
+# M0 report: G2 device-capability probes
 
-Status: **draft.** Batch 1 of the real-device results is recorded here; the other items are placeholders until Fox runs them.
+Status: **M0 closed on 2026-11-25.** Both device batches are done.
+
+- Batch 1 (background probe) has exact numbers.
+- Batch 2 (glyphs, capacity, recording, long background and lock screen) was signed off by Fox as "感觉都 ok". These items are marked **真机主观通过、未精确测量** (subjectively passed on the device, not measured precisely). Every capacity number used by the code therefore comes from the simulator.
+
+## Summary
+
+| Area | Result | Confidence |
+|---|---|---|
+| Display: layout, status / body / hint, rebuild and upgrade | Works; batch 1 had 98 writes, 0 failures, 0 timeouts | Measured (batch 1) |
+| CJK glyphs | OK on the lens | 真机主观通过、未精确测量 |
+| Text capacity | Simulator: ZH 28 per line, EN 52–59 per line, 8 body lines, 10 full-screen lines; the lens looked OK | Simulator measured; 真机主观通过、未精确测量 |
+| Gestures: tap, double, swipe, long-press / release | Used throughout both batches | 真机主观通过 |
+| Mic (glasses only) | Recording works | 真机主观通过、未精确测量; source not proven (see "Mic source") |
+| Background: short | WebView reloads about 4–5 s after `visibility=hidden`; WS back in 98 ms; no lost ticks in foreground | Measured (batch 1) |
+| Background: long, and lock screen | OK per Fox | 真机主观通过、未精确测量 |
 
 - Hardware: iPhone + Even Realities G2. Even App version: not reported; the requirement is ≥ 2.2.10.
 - Build: QR dev mode against <https://kid-glasses-m0.your-subdomain.workers.dev> (Worker `kid-glasses-m0`, Workers free tier, static assets plus a same-origin `/echo` WebSocket).
@@ -46,24 +61,34 @@ What is not known yet:
 - Whether the reload is triggered by the phone app leaving the foreground or by the plugin page being hidden inside the Even App.
 - What happens over a long background or with the phone locked.
 
-**Pending from batch 1:** glyphs, capacity, recording, long background and lock screen.
+### Batch 2 (2026-11-25, glasses-only mic build)
 
-### Batch 2 (pending)
+Fox ran the remaining items and reported only "感觉都 ok", with no readings.
 
-| Item | What to report | Result |
+| Item | Result |
+|---|---|
+| Glyphs: Hanzi pages, punctuation, full/half width, mixed, rare | 真机主观通过、未精确测量. No missing-glyph indices were reported. |
+| Capacity: ZH / EN chars per line, body and full-screen lines | 真机主观通过、未精确测量. The code uses the simulator values (see "Lens text capacity"). |
+| Recording: hold and tap | 真机主观通过、未精确测量. Not reported: frame / byte counts, the `host:` line, `dir`, the iOS prompt at first record, the no-wear `NO AUDIO FRAMES` warning, and the physical check (phone mic covered). |
+| Long background (minutes) and lock screen | 真机主观通过、未精确测量. Not reported: boot count, lost ticks, max gap, WS reconnects. |
+
+## Lens text capacity
+
+`LENS_TEXT` in `src/lib/lens-text.ts` is the one place the code takes these from. They are calibrated conservatively to the simulator.
+
+| Field | Value | Basis |
 |---|---|---|
-| Mic: hold to record | lens `frames` / `bytes` / duration after 3–5 s hold; `audioControl open -> ?` | _pending_ |
-| Mic: host fields | lens `host: …` line: does the host send a source field (`source=` / `audioSource=`), and what value? `no source field` means the `glasses` label is only the SDK default | _pending_ |
-| Mic: physical check | phone in another room (or its mic covered), speak close to the glasses or tap the frame: does RMS jump? | _pending_ |
-| Mic: frame source | lens `ev src glasses N`, and whether any `PHONE` count appears (it must not). This is the SDK-normalised label, so read it together with the `host:` line | _pending_ |
-| Mic: direction tag | lens `dir …`: a number points to a processed glasses frame; `null` is inconclusive (phone mic and older hosts both send null) | _pending_ |
-| Mic: not worn | record with `wear false`; does `!! NO AUDIO FRAMES` appear within 3 s? (this line has only been unit-tested; the simulator always sends frames) | _pending_ |
-| Mic: level | RMS / dBFS when silent vs. talking | _pending_ |
-| Mic: iOS prompt | any iOS microphone prompt at the **first** recording | _pending_ |
-| Glyphs | indices of hanzi rows with missing glyphs; empty `[ ]` in P / W / M / R samples | _pending_ |
-| Capacity | ZH chars per line, EN chars per line (abc and xxx rulers), lines per page (full screen and body) | _pending_ |
-| Long background | ticks vs. expected, lost ticks, max gap, boots, WS reconnects after 5 min and 30 min in background | _pending_ |
-| Lock screen | the same readings after 5 min locked | _pending_ |
+| `zhCharsPerLine` | 28 | Simulator Cap ZH ruler. In the pretext font model 28 hanzi are 560 px against a 568 px inner width. |
+| `enCharsPerLine` | 52 | The lower of the simulator's abc (59) and xxx (52) rulers |
+| `bodyLines` | 8 | Simulator Lines body page (body box 224 px, 27 px per line) |
+| `fullScreenLines` | 10 | Simulator Lines full page |
+| `pageMaxBytes` | 900 | Margin under the 1000-byte create/rebuild limit |
+
+How the wrapper counts and where it can go wrong:
+
+- `wrapForLens` counts a wide char (CJK, fullwidth, kana, hangul, emoji) as 1/28 of a line and any other char as 1/52. Latin text breaks at spaces.
+- Typical Chinese, English and mixed sentences wrap within the 568 px line in the pretext model. This is covered by `tests/lens-text.test.ts`.
+- Known risk: capitals and digits are wider. In the pretext model 52 × `W` is 832 px and 52 digits are 584 px, so all-caps or long numbers can wrap on the lens earlier than counted, and a page can overflow its 8 lines. Pages built from Slack text should leave slack, or M1 should measure with pretext before going live.
 
 ## Mic source evidence
 
@@ -147,8 +172,39 @@ How batch 2 decides it:
 
 Screenshots: `docs/screenshots/`.
 
+## Open risks
+
+1. **Mic source is not proven.** `src=glasses` comes from the SDK's default for a missing field. Without the `host:` line from a real device and the physical check, a phone-mic path cannot be ruled out. The cheapest check is one recording with the phone mic covered, reading the `host:` line.
+2. **The WebView reloads on background.** In batch 1, boot #2 came about 4–5 s after `visibility=hidden`. M1 must treat any background trip as a cold start:
+   - keep session state on the relay;
+   - reconnect quickly;
+   - replay missed messages from history.
+   Whether the lock screen or long backgrounds also reload or kill the socket was not measured.
+3. **Capacity numbers come from the simulator.** All-caps text and digits can overflow (see above).
+4. **Dev-mode permissions.** It is unknown whether QR dev mode enforces `app.json` permissions and the network whitelist. A packed `.ehpk` may behave differently, e.g. block an origin that is not whitelisted.
+5. **`audioControl(false)` returns `false`** in the simulator and about 3 frames arrive after stop. M1 must ignore late frames after a stop.
+6. **Git history was rewritten** by the dispatcher (filter-repo plus force-push) before batch 1. History now starts `9e8c0d7` → `0010ca1` → `82a3231`. SHAs quoted in earlier replies (for example `aa0ec38`) no longer exist.
+
+## What M1 inherits
+
+- **Display:** `DisplayQueue` (one write in flight; coalesced upgrades; 3 s timeout and redraw on `fgEnter` / visible) and the 4-box layout.
+- **Text:**
+  - `LENS_TEXT`, `wrapForLens` and `paginateForLens` to page Slack replies onto the lens.
+  - `clampToLimit` to keep each write under the byte limits.
+- **Input:** `classify` (zero-omitted click, sys vs text envelopes) and the gesture map:
+  - hold = talk, release = send;
+  - swipe = page;
+  - double = back.
+- **Audio:** glasses-only `audioControl(true, Glasses)`, `PcmAccumulator` (16 kHz s16le mono, about 3200 B per 100 ms) and the no-frames / stalled watchdog. These feed the relay's Deepgram stream.
+- **Networking:**
+  - `WsProbe`-style reconnect (3 s) with id-matched pings.
+  - The whitelist must gain the relay origin (`https://` and `wss://`) once it is deployed.
+- **Lifecycle:** the localStorage ring log and boot counter, kept as a field diagnostic.
+- **Relay design** (scaffold in `relay/`, not deployed): Cloudflare Worker + Durable Object, Slack DM loop with Fox's user token restricted to the Kid DM channel, Deepgram streaming, and a fast-answer lane that is off by default. Fox's steps are in `docs/M1-FOX-SETUP.md`.
+
 ## Open questions
 
-- Is the reload about 4–5 s after `visibility=hidden` deterministic, and does a long background or lock screen kill the WebSocket or the heartbeat for good?
+- Is the reload after `visibility=hidden` deterministic, and what do long backgrounds and the lock screen do to the socket and heartbeat (numbers, not impressions)?
 - Does the glasses mic deliver frames while `wear=false`?
-- On real hardware, is `direction` non-null for glasses frames?
+- On real hardware, does the host send a source field, and is `direction` non-null for glasses frames?
+- Which Slack workspace is Kid in? This blocks M1 setup.
