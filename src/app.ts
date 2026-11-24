@@ -321,6 +321,7 @@ export class App {
       store,
       now: () => Date.now(),
       pollMs: RELAY_TIMING.pairPollMs,
+      timeoutMs: RELAY_TIMING.httpTimeoutMs,
       timers,
       log: m => this.note(m),
       onView: v => {
@@ -942,7 +943,8 @@ export class App {
     const v = this.voice
     if (!v.active) return
     v.active = false
-    this.relay.audioStop()
+    if (userEnded) this.relay.audioStop()
+    else this.relay.audioCancel()
     let r: unknown
     try {
       r = await closeGlassesMic(this.bridge)

@@ -11,6 +11,10 @@ export const RELAY_TIMING = {
   outboxMax: 20,
   maxSendTries: 3,
   pairPollMs: 2_500,
+  connectTimeoutMs: 10_000,
+  probeMs: 5_000,
+  retryBaseMs: 5_000,
+  httpTimeoutMs: 10_000,
 } as const
 
 export const STORE_KEYS = {

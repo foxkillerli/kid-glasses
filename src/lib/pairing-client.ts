@@ -24,6 +24,7 @@ export interface PairingClientDeps {
   store: AsyncStore
   now: () => number
   pollMs: number
+  timeoutMs?: number
   timers: { setTimeout(fn: () => void, ms: number): unknown; clearTimeout(id: unknown): void }
   onView(view: PairView): void
   onToken(token: string): Promise<void>
@@ -47,8 +48,14 @@ export class PairingClient {
     this.deps.onView(this.viewValue)
   }
 
-  private post(path: string, body: string): Promise<Response> {
-    return this.deps.fetch(`${this.deps.origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body })
+  private async post(path: string, body: string): Promise<Response> {
+    const ctrl = new AbortController()
+    const timer = this.deps.timers.setTimeout(() => ctrl.abort(), this.deps.timeoutMs ?? 10_000)
+    try {
+      return await this.deps.fetch(`${this.deps.origin}${path}`, { method: 'POST', headers: { 'Content-Type': 'text/plain' }, body, signal: ctrl.signal })
+    } finally {
+      this.deps.timers.clearTimeout(timer)
+    }
   }
 
   async begin(): Promise<void> {
@@ -138,9 +145,9 @@ export class PairingClient {
     if (res.status === 429 || body?.status === 'rate-limited') return this.schedule(this.deps.pollMs * 4)
     if (body?.status === 'paired' && typeof body.token === 'string') {
       this.pending = null
+      await this.deps.onToken(body.token)
       await this.deps.store.remove(STORE_KEYS.pairing)
       this.set({ phase: 'paired', code: null, detail: '' })
-      await this.deps.onToken(body.token)
       return
     }
     if (body?.status === 'expired') return this.expire()

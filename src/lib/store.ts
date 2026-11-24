@@ -40,7 +40,8 @@ export class BridgeStore implements AsyncStore {
     if (this.bridgeOk && this.bridge.getLocalStorage) {
       try {
         const v = await this.bridge.getLocalStorage(key)
-        return typeof v === 'string' && v !== '' ? v : null
+        if (typeof v === 'string' && v !== '') return v
+        return this.fallback?.getItem(key) || null
       } catch {
         this.bridgeOk = false
       }

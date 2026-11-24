@@ -87,6 +87,11 @@ export class RelayClient {
   private attempt = 0
   private reconnectTimer: unknown = null
   private pingTimer: unknown = null
+  private connectTimer: unknown = null
+  private probeTimer: unknown = null
+  private readonly retryTimers = new Map<string, unknown>()
+  private catchingUp = false
+  private catchUpMax = 0
   private lastFrameAt = 0
   private stateValue: RelayState = 'starting'
   private wantHistory = true
@@ -171,7 +176,7 @@ export class RelayClient {
   nudge(reason: string): void {
     if (this.stopped || !this.token) return
     if (this.ws && (this.ws.readyState === OPEN || this.ws.readyState === CONNECTING)) {
-      if (this.stateValue === 'online' && this.deps.now() - this.lastFrameAt > this.t.pingMs) this.sendJson({ t: 'ping' })
+      if (this.stateValue === 'online') this.probe(reason)
       return
     }
     this.log(`relay nudge (${reason})`)
@@ -179,10 +184,44 @@ export class RelayClient {
     this.connect()
   }
 
+  private probe(reason: string): void {
+    const sentAt = this.deps.now()
+    if (!this.sendJson({ t: 'ping' })) return
+    if (this.probeTimer !== null) this.deps.timers.clearTimeout(this.probeTimer)
+    this.probeTimer = this.deps.timers.setTimeout(() => {
+      this.probeTimer = null
+      if (this.lastFrameAt > sentAt) return
+      this.log(`relay probe (${reason}) got no answer; reconnecting`)
+      this.dropSocket(4000, 'probe')
+    }, this.t.probeMs)
+  }
+
+  private dropSocket(code: number, reason: string): void {
+    const ws = this.ws
+    this.ws = null
+    if (ws) ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+    try {
+      ws?.close(code, reason)
+    } catch {
+      this.log('relay close failed')
+    }
+    this.attempt = 0
+    this.clearTimers()
+    this.connect()
+  }
+
   private clearTimers() {
-    if (this.reconnectTimer !== null) this.deps.timers.clearTimeout(this.reconnectTimer)
+    for (const [timer, clear] of [
+      [this.reconnectTimer, 'clearTimeout'],
+      [this.connectTimer, 'clearTimeout'],
+      [this.probeTimer, 'clearTimeout'],
+    ] as const) if (timer !== null) this.deps.timers[clear](timer)
     if (this.pingTimer !== null) this.deps.timers.clearInterval(this.pingTimer)
+    for (const t of this.retryTimers.values()) this.deps.timers.clearTimeout(t)
+    this.retryTimers.clear()
     this.reconnectTimer = null
+    this.connectTimer = null
+    this.probeTimer = null
     this.pingTimer = null
   }
 
@@ -208,6 +247,20 @@ export class RelayClient {
       return
     }
     this.ws = ws
+    this.connectTimer = this.deps.timers.setTimeout(() => {
+      this.connectTimer = null
+      if (this.ws === ws && this.stateValue !== 'online') {
+        this.log('relay connect timed out')
+        this.ws = null
+        ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+        try {
+          ws.close(4000, 'connect timeout')
+        } catch {
+          this.log('relay close failed')
+        }
+        void this.onClosed(4000)
+      }
+    }, this.t.connectTimeoutMs)
     ws.onopen = () => {
       if (this.ws !== ws) return
       this.lastFrameAt = this.deps.now()
@@ -271,6 +324,10 @@ export class RelayClient {
     switch (m.t) {
       case 'auth.ok':
         this.attempt = 0
+        if (this.connectTimer !== null) this.deps.timers.clearTimeout(this.connectTimer)
+        this.connectTimer = null
+        this.catchingUp = true
+        this.catchUpMax = 0
         this.sendJson({ t: 'hello', lastSeq: this.lastSeq })
         if (this.wantHistory) this.sendJson({ t: 'history', limit: 20 })
         this.startPing()
@@ -279,6 +336,10 @@ export class RelayClient {
         return
       case 'msg':
         this.acceptItems([m as unknown as RelayItem], this.stateValue === 'online' ? 'live' : 'replay')
+        return
+      case 'replay.done':
+        this.catchingUp = false
+        this.bumpSeq(Math.max(Number(m.upTo) || 0, this.catchUpMax))
         return
       case 'history':
         this.wantHistory = false
@@ -295,7 +356,7 @@ export class RelayClient {
       }
       case 'error': {
         const cid = typeof m.cid === 'string' ? m.cid : undefined
-        if (cid) this.failOutbox(cid)
+        if (cid) this.failOutbox(cid, String(m.code))
         this.deps.events.error?.(String(m.code), String(m.message), cid)
         return
       }
@@ -319,6 +380,10 @@ export class RelayClient {
   }
 
   private bumpSeq(seq: number): void {
+    if (this.catchingUp) {
+      if (Number.isFinite(seq) && seq > this.catchUpMax) this.catchUpMax = seq
+      return
+    }
     if (Number.isFinite(seq) && seq > this.lastSeq) {
       this.lastSeq = seq
       void this.deps.store.set(STORE_KEYS.lastSeq, String(seq))
@@ -344,23 +409,42 @@ export class RelayClient {
     }, this.t.pingMs)
   }
 
-  private persistOutbox(): void {
-    void this.deps.store.set(STORE_KEYS.outbox, JSON.stringify(this.outbox))
+  private persistOutbox(): Promise<void> {
     this.deps.events.outbox?.(this.pending)
+    return this.deps.store.set(STORE_KEYS.outbox, JSON.stringify(this.outbox)).catch(() => this.log('relay outbox save failed'))
   }
 
   private ackOutbox(cid: string): void {
     const before = this.outbox.length
     this.outbox = this.outbox.filter(e => e.cid !== cid)
-    if (this.outbox.length !== before) this.persistOutbox()
+    const t = this.retryTimers.get(cid)
+    if (t !== undefined) this.deps.timers.clearTimeout(t)
+    this.retryTimers.delete(cid)
+    if (this.outbox.length !== before) void this.persistOutbox()
   }
 
-  private failOutbox(cid: string): void {
+  private failOutbox(cid: string, code: string): void {
     const e = this.outbox.find(x => x.cid === cid)
     if (!e) return
     e.tries++
-    if (e.tries >= this.t.maxSendTries) this.outbox = this.outbox.filter(x => x !== e)
-    this.persistOutbox()
+    const permanent = code === 'empty-text' || code === 'SlackConfigError' || code === 'ChannelNotAllowedError'
+    if (permanent || e.tries >= this.t.maxSendTries) {
+      this.outbox = this.outbox.filter(x => x !== e)
+      void this.persistOutbox()
+      return
+    }
+    void this.persistOutbox()
+    const delay = this.t.retryBaseMs * 2 ** (e.tries - 1)
+    const old = this.retryTimers.get(cid)
+    if (old !== undefined) this.deps.timers.clearTimeout(old)
+    this.retryTimers.set(
+      cid,
+      this.deps.timers.setTimeout(() => {
+        this.retryTimers.delete(cid)
+        const still = this.outbox.find(x => x.cid === cid)
+        if (still && this.stateValue === 'online') this.sendJson({ t: 'say', text: still.text, cid })
+      }, delay),
+    )
   }
 
   private flushOutbox(): void {
@@ -369,12 +453,12 @@ export class RelayClient {
     for (const e of this.outbox) this.sendJson({ t: 'say', text: e.text, cid: e.cid })
   }
 
-  say(text: string): string | null {
+  async say(text: string): Promise<string | null> {
     const clean = text.trim()
-    if (!clean) return null
+    if (!clean || this.outbox.length >= this.t.outboxMax) return null
     const entry: OutboxEntry = { cid: this.deps.uuid(), text: clean, at: this.deps.now(), tries: 0 }
-    this.outbox = [...this.outbox, entry].slice(-this.t.outboxMax)
-    this.persistOutbox()
+    this.outbox = [...this.outbox, entry]
+    await this.persistOutbox()
     if (this.stateValue === 'online') this.sendJson({ t: 'say', text: entry.text, cid: entry.cid })
     return entry.cid
   }
@@ -398,6 +482,10 @@ export class RelayClient {
 
   audioStop(): void {
     this.sendJson({ t: 'audio.stop' })
+  }
+
+  audioCancel(): void {
+    this.sendJson({ t: 'audio.cancel' })
   }
 
   newSession(): void {

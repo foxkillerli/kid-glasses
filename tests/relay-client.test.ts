@@ -33,9 +33,10 @@ function setup(opts: { token?: string | null; store?: MemoryStore; random?: numb
     events,
   })
   const last = () => sockets[sockets.length - 1]
-  const online = async () => {
+  const online = async (upTo = 0) => {
     last().open()
     last().frame({ t: 'auth.ok' })
+    last().frame({ t: 'replay.done', upTo })
     await tick()
   }
   return { client, timers, store, sockets, states, items, errors, last, online }
@@ -108,7 +109,7 @@ describe('RelayClient connection', () => {
     const before = sockets.length
     client.nudge('visible')
     expect(sockets.length).toBe(before + 1)
-    expect(timers.pendingDelays()).toEqual([])
+    expect(timers.pendingDelays()).toEqual([10_000])
   })
 
   it('a 4401 close forgets the token and asks for pairing again, without reconnecting', async () => {
@@ -141,7 +142,7 @@ describe('RelayClient outbox: unacknowledged says are resent with the same cid',
     const { client, last, online, store } = setup()
     await client.init()
     client.start()
-    const cid = client.say('今天几点放学')
+    const cid = await client.say('今天几点放学')
     expect(last().types()).toEqual([])
     expect(JSON.parse(store.map.get(STORE_KEYS.outbox) as string)).toHaveLength(1)
     await online()
@@ -156,7 +157,7 @@ describe('RelayClient outbox: unacknowledged says are resent with the same cid',
     await client.init()
     client.start()
     await online()
-    const cid = client.say('a')
+    const cid = await client.say('a')
     last().drop()
     timers.advance(timers.pendingDelays()[0])
     await online()
@@ -170,7 +171,7 @@ describe('RelayClient outbox: unacknowledged says are resent with the same cid',
     const first = setup({ store })
     await first.client.init()
     first.client.start()
-    const cid = first.client.say('reload me')
+    const cid = await first.client.say('reload me')
     const second = setup({ store })
     await second.client.init()
     second.client.start()
@@ -182,7 +183,7 @@ describe('RelayClient outbox: unacknowledged says are resent with the same cid',
     const { client, last, online } = setup()
     await client.init()
     client.start()
-    const cid = client.say('a')
+    const cid = await client.say('a')
     await online()
     last().frame({ t: 'msg', seq: 9, from: 'glasses', text: 'a', at: 1, session: 's', cid })
     expect(client.pending).toEqual([])
@@ -192,7 +193,7 @@ describe('RelayClient outbox: unacknowledged says are resent with the same cid',
     const { client, last, online, timers, errors } = setup()
     await client.init()
     client.start()
-    const cid = client.say('a') as string
+    const cid = (await client.say('a')) as string
     for (let i = 0; i < 3; i++) {
       await online()
       last().frame({ t: 'error', code: 'SlackApiError', message: 'x', cid })
@@ -222,3 +223,88 @@ describe('RelayClient audio', () => {
     expect(last().json().filter(m => m.t.toString().startsWith('audio'))).toEqual([{ t: 'audio.start', cid }, { t: 'audio.stop' }])
   })
 })
+
+describe('RelayClient review fixes', () => {
+  it('F04: a socket stuck in CONNECTING or waiting for auth.ok is dropped after 10 s and retried', async () => {
+    const { client, timers, sockets } = setup()
+    await client.init()
+    client.start()
+    timers.advance(10_000)
+    expect(sockets[0].closedWith?.code).toBe(4000)
+    expect(client.state).toBe('offline')
+    timers.advance(timers.pendingDelays().find(d => d < 10_000) ?? 0)
+    expect(sockets).toHaveLength(2)
+    sockets[1].open()
+    timers.advance(10_000)
+    expect(sockets[1].closedWith?.code).toBe(4000)
+  })
+
+  it('F04: nudge on an open socket probes with a ping and reconnects if nothing answers in 5 s', async () => {
+    const { client, timers, sockets, online } = setup()
+    await client.init()
+    client.start()
+    await online()
+    client.nudge('visible')
+    expect(sockets[0].types().at(-1)).toBe('ping')
+    timers.advance(5_000)
+    expect(sockets[0].closedWith?.code).toBe(4000)
+    expect(sockets).toHaveLength(2)
+  })
+
+  it('F06: the persisted cursor only advances after replay.done, so a drop mid-replay leaves no gap', async () => {
+    const { client, store, last, timers } = setup()
+    await client.init()
+    client.start()
+    last().open()
+    last().frame({ t: 'auth.ok' })
+    last().frame({ t: 'msg', seq: 50, from: 'kid', text: 'live first', at: 1, session: null })
+    expect(store.map.get(STORE_KEYS.lastSeq)).toBeUndefined()
+    last().drop()
+    timers.advance(timers.pendingDelays().find(d => d < 10_000) ?? 0)
+    last().open()
+    expect(last().json()[0]).toEqual({ t: 'auth', token: 'kgd_test' })
+    last().frame({ t: 'auth.ok' })
+    expect(last().json()[1]).toEqual({ t: 'hello', lastSeq: 0 })
+    last().frame({ t: 'msg', seq: 49, from: 'kid', text: 'replayed', at: 1, session: null })
+    last().frame({ t: 'replay.done', upTo: 49 })
+    expect(store.map.get(STORE_KEYS.lastSeq)).toBe('49')
+  })
+
+  it('F05: a retryable Slack error is retried on the same socket after a backoff, with the same cid', async () => {
+    const { client, last, online, timers } = setup()
+    await client.init()
+    client.start()
+    await online()
+    const cid = await client.say('retry me')
+    last().frame({ t: 'error', code: 'slack-unreachable', message: 'x', cid })
+    timers.advance(5_000)
+    expect(last().json().filter(m => m.t === 'say')).toEqual([
+      { t: 'say', text: 'retry me', cid },
+      { t: 'say', text: 'retry me', cid },
+    ])
+  })
+
+  it('F07: the outbox is saved before the say goes out, and a full outbox refuses new turns instead of dropping old ones', async () => {
+    const { client, store, last, online } = setup()
+    await client.init()
+    client.start()
+    await online()
+    const cid = await client.say('saved first')
+    expect(JSON.parse(store.map.get(STORE_KEYS.outbox) as string)[0].cid).toBe(cid)
+    last().drop()
+    for (let i = 0; i < 19; i++) await client.say(`m${i}`)
+    expect(await client.say('one too many')).toBeNull()
+    expect(client.pending[0].cid).toBe(cid)
+  })
+
+  it('F08: audioCancel sends audio.cancel', async () => {
+    const { client, last, online } = setup()
+    await client.init()
+    client.start()
+    await online()
+    client.audioStart()
+    client.audioCancel()
+    expect(last().types().slice(-2)).toEqual(['audio.start', 'audio.cancel'])
+  })
+})
+
