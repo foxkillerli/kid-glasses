@@ -1,5 +1,4 @@
 import {
-  AudioInputSource,
   CreateStartUpPageContainer,
   RebuildPageContainer,
   TextContainerProperty,
@@ -18,6 +17,7 @@ import { newHeartbeat, tick, expectedTicks, lostTicks, formatDuration, hhmm, hhm
 import { WsProbe } from './lib/ws-probe'
 import { paginateLines } from './lib/paginate'
 import { LENS_TEXT } from './lib/lens-text'
+import { MIC_SOURCE, closeGlassesMic, openGlassesMic } from './lib/mic-control'
 import { SCREEN_W, SCREEN_H } from './lib/limits'
 import {
   COMMON_HANZI,
@@ -40,7 +40,6 @@ export function echoUrlFor(loc: { protocol: string; host: string; hostname: stri
   return PUBLIC_ECHO_URL
 }
 const HEARTBEAT_MS = 1000
-export const MIC_SOURCE = AudioInputSource.Glasses
 const NO_AUDIO_MS = 3000
 const WS_PING_MS = 5000
 const BODY_MAX_LINES = LENS_TEXT.bodyLines
@@ -573,7 +572,7 @@ export class App {
       case 'fgEnter':
         if (this.mic.recording) {
           this.note('fgEnter while recording -> re-arm audioControl')
-          void this.bridge.audioControl(true, MIC_SOURCE).then(r => this.note(`re-arm audioControl -> ${r}`))
+          void openGlassesMic(this.bridge).then(r => this.note(`re-arm audioControl -> ${r}`))
         }
         this.forceRedraw()
         return
@@ -659,7 +658,7 @@ export class App {
     this.render()
     let r: unknown
     try {
-      r = await this.bridge.audioControl(true, MIC_SOURCE)
+      r = await openGlassesMic(this.bridge)
     } catch (err) {
       r = `throw ${String(err).slice(0, 40)}`
     }
@@ -674,7 +673,7 @@ export class App {
     m.recording = false
     let r: unknown
     try {
-      r = await this.bridge.audioControl(false)
+      r = await closeGlassesMic(this.bridge)
     } catch (err) {
       r = `throw ${String(err).slice(0, 40)}`
     }
