@@ -9,7 +9,7 @@ import {
   type EvenAppBridge,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
-import { micHealth, micHealthLine, countFrameSource, type FrameSourceCount, type MicHealthInput } from './lib/mic-health'
+import { micHealth, micHealthLine, countFrameSource, rawAudioMeta, type FrameSourceCount, type MicHealthInput } from './lib/mic-health'
 import { DisplayQueue, type Layout, type TextBox } from './lib/display'
 import { classify, type Gesture } from './lib/events'
 import { RingLog, MemoryKV, type KV } from './lib/ringlog'
@@ -129,6 +129,7 @@ interface MicState {
   lastSrc: FrameSourceCount | null
   lastDir: string
   lastRole: string
+  lastRaw: string
   alerted: boolean
 }
 
@@ -182,6 +183,7 @@ export class App {
     lastSrc: null,
     lastDir: '-',
     lastRole: '-',
+    lastRaw: '-',
     alerted: false,
   }
   private device: DeviceView = { conn: '?', wear: '?', bat: '?' }
@@ -450,19 +452,21 @@ export class App {
       lines.push(h === 'no-frames' || h === 'stalled' ? micHealthLine(h, hi) : `ev src ${srcSummary(m.src)} dir ${m.lastDir}`)
       lines.push(`audioControl ${m.lastControl}`)
       lines.push(devLine)
+      lines.push(`host: ${m.lastRaw}`.slice(0, 46))
     } else {
       lines.push(`○ idle  src: glasses (only)`)
       lines.push(`audioControl ${m.lastControl}`)
       lines.push(devLine)
       if (m.last) {
         const c = m.last
-        lines.push(`last: ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr`)
+        lines.push(`last: ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr${m.framesWhileIdle ? ` +${m.framesWhileIdle} idle` : ''}`)
         lines.push(c.frames === 0 ? '!! last clip got NO AUDIO FRAMES' : `rms ${formatDb(c.rmsDb)}dB peak ${formatDb(c.peakDb)}dB`)
         if (m.lastSrc) lines.push(`ev src ${srcSummary(m.lastSrc)} dir ${m.lastDir}`)
+        lines.push(`host: ${m.lastRaw}`.slice(0, 46))
       } else {
         lines.push('last clip: none')
+        if (m.framesWhileIdle > 0) lines.push(`idle frames: ${m.framesWhileIdle}`)
       }
-      if (m.framesWhileIdle > 0) lines.push(`idle frames: ${m.framesWhileIdle}`)
     }
     return lines.slice(0, BODY_MAX_LINES).join('\n')
   }
@@ -519,7 +523,7 @@ export class App {
 
   private onEvent(ev: EvenHubEvent): void {
     if (ev.audioEvent) {
-      this.onAudio(ev.audioEvent)
+      this.onAudio(ev.audioEvent, ev.jsonData)
       return
     }
     if (ev.menuItemClickEvent) {
@@ -541,7 +545,7 @@ export class App {
     this.onGesture(c.gesture)
   }
 
-  private onAudio(a: AudioEventPayload): void {
+  private onAudio(a: AudioEventPayload, raw: unknown): void {
     const m = this.mic
     const pcm = a.audioPcm
     if (!pcm) return
@@ -553,8 +557,9 @@ export class App {
       m.src = countFrameSource(m.src, a.source)
       m.lastDir = a.direction === null || a.direction === undefined ? 'null' : String(a.direction)
       m.lastRole = String(a.speakerRole ?? '-')
+      m.lastRaw = rawAudioMeta(raw)
       if (first) {
-        this.note(`first audio frame ${pcm.length}B after ${m.lastFrameAt - m.startedAt}ms src=${a.source} dir=${m.lastDir} role=${m.lastRole}`)
+        this.note(`first audio frame ${pcm.length}B after ${m.lastFrameAt - m.startedAt}ms src=${a.source} dir=${m.lastDir} role=${m.lastRole} host: ${m.lastRaw}`)
       }
       if (a.source !== MIC_SOURCE && m.src.phone + m.src.other === 1) this.note(`!! unexpected audio frame source=${String(a.source)}`)
     } else {
@@ -647,6 +652,7 @@ export class App {
     m.src = { ...NO_SRC }
     m.lastDir = '-'
     m.lastRole = '-'
+    m.lastRaw = '-'
     m.alerted = false
     m.lastControl = 'open -> pending'
     this.render()
@@ -677,7 +683,7 @@ export class App {
       m.lastSrc = { ...m.src }
       const c = m.last
       this.note(
-        `rec stop ${reason} ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr wall ${((Date.now() - m.startedAt) / 1000).toFixed(2)}s rms ${formatDb(c.rmsDb)} peak ${formatDb(c.peakDb)} ev-src ${srcSummary(m.src)} dir ${m.lastDir} role ${m.lastRole}`,
+        `rec stop ${reason} ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr wall ${((Date.now() - m.startedAt) / 1000).toFixed(2)}s rms ${formatDb(c.rmsDb)} peak ${formatDb(c.peakDb)} ev-src ${srcSummary(m.src)} dir ${m.lastDir} role ${m.lastRole} host: ${m.lastRaw}`,
       )
     }
     this.render()

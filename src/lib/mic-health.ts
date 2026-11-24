@@ -41,3 +41,15 @@ export function countFrameSource(c: FrameSourceCount, source: unknown): FrameSou
   if (source === 'phone') return { ...c, phone: c.phone + 1 }
   return { ...c, other: c.other + 1 }
 }
+
+const PCM_KEYS = new Set(['audioPcm', 'audio_pcm', 'pcm'])
+
+export function rawAudioMeta(json: unknown): string {
+  if (!json || typeof json !== 'object') return 'no raw json'
+  const parts: string[] = []
+  for (const [k, v] of Object.entries(json as Record<string, unknown>)) {
+    if (PCM_KEYS.has(k)) continue
+    parts.push(`${k}=${v === null ? 'null' : typeof v === 'object' ? 'obj' : String(v)}`)
+  }
+  return parts.length ? parts.join(' ') : 'no source field'
+}

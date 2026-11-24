@@ -1,5 +1,5 @@
 import { describe, expect, it } from 'vitest'
-import { countFrameSource, micHealth, micHealthLine, type MicHealthInput } from '../src/lib/mic-health'
+import { countFrameSource, micHealth, micHealthLine, rawAudioMeta, type MicHealthInput } from '../src/lib/mic-health'
 
 const base: MicHealthInput = { recording: true, startedAt: 1000, frames: 0, lastFrameAt: 0, now: 1000, timeoutMs: 3000 }
 
@@ -28,5 +28,14 @@ describe('countFrameSource', () => {
     let c = { glasses: 0, phone: 0, other: 0 }
     for (const s of ['glasses', 'glasses', 'phone', undefined]) c = countFrameSource(c, s)
     expect(c).toEqual({ glasses: 2, phone: 1, other: 1 })
+  })
+})
+
+describe('rawAudioMeta', () => {
+  it('lists the host fields next to the PCM, so a missing source is visible', () => {
+    expect(rawAudioMeta({ audioPcm: [0, 0] })).toBe('no source field')
+    expect(rawAudioMeta({ audioPcm: [0, 0], audioSource: 'glasses', direction: 12 })).toBe('audioSource=glasses direction=12')
+    expect(rawAudioMeta({ audio_pcm: 'AAA=', source: 'phone', direction: null })).toBe('source=phone direction=null')
+    expect(rawAudioMeta(undefined)).toBe('no raw json')
   })
 })
