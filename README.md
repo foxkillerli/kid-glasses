@@ -9,7 +9,7 @@ An Even Realities G2 plugin for Even Hub. The end goal is a voice "Kid panel": v
 | Menu (hello screen) | Layout with a status line (app · page · clock), a body and a gesture hint line |
 | 1. Glyph test (CJK) | 480 common hanzi in rows with indices (`001`, `021`, …); punctuation `P01..P30`; full-/half-width pairs `W01..W31`; mixed CN/EN/digits `M01..M08`; rare chars and symbols `R01..R32`. Every sample sits in `[ ]`, so a dropped glyph shows as empty brackets |
 | 2. Page capacity | Self-describing rulers for Chinese chars per line (十=10 廿=20 卅=30 卌=40), English chars per line (digit at every 10th position), a mixed paragraph, and numbered lines for lines per page (full-screen and body area) |
-| 3. Mic capture | `audioControl` with hold-to-record (LONG_PRESS 9 / RELEASE 10) and a tap toggle as fallback; glasses or phone mic; live bytes, duration (16 kHz s16le mono), RMS bar plus dBFS; the last clip is kept in memory as `Int16Array` |
+| 3. Mic capture | `audioControl(true, AudioInputSource.Glasses)` with hold-to-record (LONG_PRESS 9 / RELEASE 10) and a tap toggle as fallback. **Glasses mic only**: there is no phone-mic option and no `getUserMedia`. Shows `src: glasses`, frames, bytes, duration (16 kHz s16le mono), RMS bar plus dBFS, the per-frame `source` / `direction` the host reports, the `audioControl` return value, and the device `conn` / `wear` / `bat` state. If no frame arrives within 3 s it shows `!! NO AUDIO FRAMES - check wear / connection` (or `AUDIO STALLED` if frames stop). The last clip is kept in memory as `Int16Array` |
 | 4. Background probe | 1 s heartbeat (ticks vs. wall-clock expected, largest gap) and a WebSocket echo ping every 5 s to `wss://echo.websocket.org`. Lifecycle events go into a 1000-entry localStorage ring buffer, which also counts reloads (`boot #n`) |
 
 The phone screen (WebView) mirrors the current lens text in a monospace box and shows the log. Use it as the reference when you check which glyphs are missing on the lens.
@@ -117,12 +117,12 @@ The upload JWT is a short-lived per-upload token, not an account credential. Nev
 |---|---|---|---|---|
 | Menu | move cursor | open | exit dialog | – |
 | Glyph / Capacity | down = next, up = prev | – | back to menu | – |
-| Mic | switch glasses ↔ phone mic (idle only) | start / stop | stop and back to menu | hold = record, release = stop |
+| Mic | – | start / stop | stop and back to menu | hold = record, release = stop |
 | BG probe | – | WS reconnect | back to menu | clear log + reset heartbeat |
 
 ## Network whitelist and CORS
 
-`app.json` asks for `g2-microphone`, `phone-microphone` and `network`. The network whitelist holds exactly the deployed origin, in its two schemes:
+`app.json` asks for `g2-microphone` and `network` only; `phone-microphone` was removed because the plugin records from the glasses mic only. The network whitelist holds exactly the deployed origin, in its two schemes:
 
 - `https://kid-glasses-m0.your-subdomain.workers.dev`
 - `wss://kid-glasses-m0.your-subdomain.workers.dev`
@@ -143,4 +143,4 @@ M1 will deploy the relay to **Cloudflare Workers + a Durable Object**, through c
 
 ## Real-device test plan
 
-The checklist of numbers to report will be filled in after the first device run; see `docs/M0-REPORT.md`, written after Fox's test.
+Batch 1 (background probe, mic prompt) is recorded in `docs/M0-REPORT.md` under "Device results". The batch-2 checklist of numbers to report (mic frames / source / direction / no-audio warning, glyphs, capacity, long background, lock screen) is the table in that section.

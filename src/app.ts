@@ -4,9 +4,12 @@ import {
   RebuildPageContainer,
   TextContainerProperty,
   TextContainerUpgrade,
+  type AudioEventPayload,
+  type DeviceStatus,
   type EvenAppBridge,
   type EvenHubEvent,
 } from '@evenrealities/even_hub_sdk'
+import { micHealth, micHealthLine, countFrameSource, type FrameSourceCount, type MicHealthInput } from './lib/mic-health'
 import { DisplayQueue, type Layout, type TextBox } from './lib/display'
 import { classify, type Gesture } from './lib/events'
 import { RingLog, MemoryKV, type KV } from './lib/ringlog'
@@ -36,6 +39,8 @@ export function echoUrlFor(loc: { protocol: string; host: string; hostname: stri
   return PUBLIC_ECHO_URL
 }
 const HEARTBEAT_MS = 1000
+export const MIC_SOURCE = AudioInputSource.Glasses
+const NO_AUDIO_MS = 3000
 const WS_PING_MS = 5000
 const BODY_MAX_LINES = 7
 const PAGE_MAX_BYTES = 900
@@ -112,15 +117,34 @@ const MENU: Array<{ label: string; open: () => Screen }> = [
 
 interface MicState {
   recording: boolean
-  source: AudioInputSource
   mode: 'long' | 'tap'
   startedAt: number
   acc: PcmAccumulator | null
   last: ClipStats | null
-  lastSource: AudioInputSource | null
   lastControl: string
   framesWhileIdle: number
   lastLongEndAt: number
+  lastFrameAt: number
+  src: FrameSourceCount
+  lastSrc: FrameSourceCount | null
+  lastDir: string
+  lastRole: string
+  alerted: boolean
+}
+
+interface DeviceView {
+  conn: string
+  wear: string
+  bat: string
+}
+
+const NO_SRC: FrameSourceCount = { glasses: 0, phone: 0, other: 0 }
+
+function srcSummary(c: FrameSourceCount): string {
+  const parts = [`glasses ${c.glasses}`]
+  if (c.phone) parts.push(`PHONE ${c.phone}`)
+  if (c.other) parts.push(`other ${c.other}`)
+  return parts.join(' ')
 }
 
 interface BootInfo {
@@ -146,16 +170,21 @@ export class App {
   private readonly ws: WsProbe
   private readonly mic: MicState = {
     recording: false,
-    source: AudioInputSource.Glasses,
     mode: 'tap',
     startedAt: 0,
     acc: null,
     last: null,
-    lastSource: null,
     lastControl: '-',
     framesWhileIdle: 0,
     lastLongEndAt: 0,
+    lastFrameAt: 0,
+    src: { ...NO_SRC },
+    lastSrc: null,
+    lastDir: '-',
+    lastRole: '-',
+    alerted: false,
   }
+  private device: DeviceView = { conn: '?', wear: '?', bat: '?' }
   private created = false
   private lastGesture = '-'
   private eventsSeen = 0
@@ -239,15 +268,24 @@ export class App {
       this.note(`onLaunchSource failed ${String(err).slice(0, 40)}`)
     }
     let lastStatus = ''
+    const onStatus = (st: DeviceStatus, via: string) => {
+      this.device = { conn: String(st.connectType), wear: String(st.isWearing), bat: String(st.batteryLevel) }
+      const s = `conn=${st.connectType} wear=${st.isWearing} bat=${st.batteryLevel} chg=${st.isCharging} case=${st.isInCase}`
+      if (s !== lastStatus) this.note(`device${via} ${s}`)
+      lastStatus = s
+    }
     try {
-      this.bridge.onDeviceStatusChanged(st => {
-        const s = `conn=${st.connectType} wear=${st.isWearing} bat=${st.batteryLevel} chg=${st.isCharging} case=${st.isInCase}`
-        if (s !== lastStatus) this.note(`device ${s}`)
-        lastStatus = s
-      })
+      this.bridge.onDeviceStatusChanged(st => onStatus(st, ''))
     } catch (err) {
       this.note(`onDeviceStatusChanged failed ${String(err).slice(0, 40)}`)
     }
+    this.bridge
+      .getDeviceInfo()
+      .then(info => {
+        if (info?.status) onStatus(info.status, `(info ${info.model})`)
+        else this.note('getDeviceInfo -> null')
+      })
+      .catch(err => this.note(`getDeviceInfo failed ${String(err).slice(0, 40)}`))
   }
 
   private async sendLayout(layout: Layout): Promise<boolean> {
@@ -359,7 +397,7 @@ export class App {
       case 'cap':
         return 'swipe dn: next  up: prev  2tap: menu'
       case 'mic':
-        return this.mic.recording ? 'release / tap: stop' : 'hold: rec  tap: toggle  swipe: mic src  2tap: menu'
+        return this.mic.recording ? 'release / tap: stop' : 'hold: rec  tap: toggle  2tap: menu'
       case 'bg':
         return 'tap: WS reconnect  hold: clear log  2tap: menu'
     }
@@ -385,30 +423,47 @@ export class App {
     }
   }
 
+  private micHealthInput(): MicHealthInput {
+    const m = this.mic
+    return {
+      recording: m.recording,
+      startedAt: m.startedAt,
+      frames: m.acc?.frames ?? 0,
+      lastFrameAt: m.lastFrameAt,
+      now: Date.now(),
+      timeoutMs: NO_AUDIO_MS,
+    }
+  }
+
   private micBody(): string {
     const m = this.mic
-    const src = m.source === AudioInputSource.Glasses ? 'GLASSES' : 'PHONE'
+    const d = this.device
     const lines: string[] = []
+    const devLine = `conn ${d.conn}  wear ${d.wear}  bat ${d.bat}`
     if (m.recording && m.acc) {
       const db = toDbfs(m.acc.lastFrameRms)
-      lines.push(`● REC ${src} (${m.mode})  ${bytesToSeconds(m.acc.totalBytes).toFixed(1)}s`)
-      lines.push(`bytes ${m.acc.totalBytes}  frames ${m.acc.frames}`)
-      lines.push(`${levelBar(db)} ${formatDb(db)}dB`)
-      lines.push(`rms ${Math.round(m.acc.lastFrameRms)}  wall ${((Date.now() - m.startedAt) / 1000).toFixed(1)}s`)
-      lines.push(`audioControl -> ${m.lastControl}`)
+      const hi = this.micHealthInput()
+      const h = micHealth(hi)
+      lines.push(`● REC src: glasses (${m.mode})  ${bytesToSeconds(m.acc.totalBytes).toFixed(1)}s`)
+      lines.push(`frames ${m.acc.frames}  bytes ${m.acc.totalBytes}`)
+      lines.push(`${levelBar(db)} ${formatDb(db)}dB rms ${Math.round(m.acc.lastFrameRms)}`)
+      lines.push(h === 'no-frames' || h === 'stalled' ? micHealthLine(h, hi) : `ev src ${srcSummary(m.src)} dir ${m.lastDir}`)
+      lines.push(`audioControl ${m.lastControl}`)
+      lines.push(devLine)
     } else {
-      lines.push(`○ idle  src: ${src}`)
-      lines.push(`audioControl -> ${m.lastControl}`)
+      lines.push(`○ idle  src: glasses (only)`)
+      lines.push(`audioControl ${m.lastControl}`)
+      lines.push(devLine)
+      if (m.last) {
+        const c = m.last
+        lines.push(`last: ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr`)
+        lines.push(c.frames === 0 ? '!! last clip got NO AUDIO FRAMES' : `rms ${formatDb(c.rmsDb)}dB peak ${formatDb(c.peakDb)}dB`)
+        if (m.lastSrc) lines.push(`ev src ${srcSummary(m.lastSrc)} dir ${m.lastDir}`)
+      } else {
+        lines.push('last clip: none')
+      }
+      if (m.framesWhileIdle > 0) lines.push(`idle frames: ${m.framesWhileIdle}`)
     }
-    if (m.last) {
-      const c = m.last
-      const lsrc = m.lastSource === AudioInputSource.Phone ? 'phone' : 'glasses'
-      lines.push(`last(${lsrc}): ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr`)
-      lines.push(`rms ${formatDb(c.rmsDb)}dB peak ${formatDb(c.peakDb)}dB`)
-    } else {
-      lines.push('last clip: none')
-    }
-    if (m.framesWhileIdle > 0) lines.push(`idle frames: ${m.framesWhileIdle}`)
     return lines.slice(0, BODY_MAX_LINES).join('\n')
   }
 
@@ -450,12 +505,21 @@ export class App {
   }
 
   private onMicRefresh(): void {
-    if (this.screen.kind === 'mic' && this.mic.recording) this.refresh()
+    const m = this.mic
+    if (m.recording && !m.alerted) {
+      const hi = this.micHealthInput()
+      const h = micHealth(hi)
+      if (h === 'no-frames' || h === 'stalled') {
+        m.alerted = true
+        this.note(`${micHealthLine(h, hi)} (${this.device.conn} wear=${this.device.wear})`)
+      }
+    }
+    if (this.screen.kind === 'mic' && m.recording) this.refresh()
   }
 
   private onEvent(ev: EvenHubEvent): void {
     if (ev.audioEvent) {
-      this.onAudio(ev.audioEvent.audioPcm)
+      this.onAudio(ev.audioEvent)
       return
     }
     if (ev.menuItemClickEvent) {
@@ -477,12 +541,24 @@ export class App {
     this.onGesture(c.gesture)
   }
 
-  private onAudio(pcm: Uint8Array | undefined): void {
+  private onAudio(a: AudioEventPayload): void {
+    const m = this.mic
+    const pcm = a.audioPcm
     if (!pcm) return
-    if (this.mic.recording && this.mic.acc) {
-      this.mic.acc.push(pcm)
+    if (m.recording && m.acc) {
+      const first = m.acc.frames === 0
+      m.acc.push(pcm)
+      m.lastFrameAt = Date.now()
+      m.alerted = false
+      m.src = countFrameSource(m.src, a.source)
+      m.lastDir = a.direction === null || a.direction === undefined ? 'null' : String(a.direction)
+      m.lastRole = String(a.speakerRole ?? '-')
+      if (first) {
+        this.note(`first audio frame ${pcm.length}B after ${m.lastFrameAt - m.startedAt}ms src=${a.source} dir=${m.lastDir} role=${m.lastRole}`)
+      }
+      if (a.source !== MIC_SOURCE && m.src.phone + m.src.other === 1) this.note(`!! unexpected audio frame source=${String(a.source)}`)
     } else {
-      this.mic.framesWhileIdle++
+      m.framesWhileIdle++
     }
   }
 
@@ -491,7 +567,7 @@ export class App {
       case 'fgEnter':
         if (this.mic.recording) {
           this.note('fgEnter while recording -> re-arm audioControl')
-          void this.bridge.audioControl(true, this.mic.source).then(r => this.note(`re-arm audioControl -> ${r}`))
+          void this.bridge.audioControl(true, MIC_SOURCE).then(r => this.note(`re-arm audioControl -> ${r}`))
         }
         this.forceRedraw()
         return
@@ -557,9 +633,6 @@ export class App {
       if (Date.now() - m.lastLongEndAt < 700) return
       if (m.recording) void this.stopRecording('tap')
       else void this.startRecording('tap')
-    } else if ((g === 'up' || g === 'down') && !m.recording) {
-      m.source = m.source === AudioInputSource.Glasses ? AudioInputSource.Phone : AudioInputSource.Glasses
-      this.note(`mic source -> ${m.source}`)
     }
   }
 
@@ -570,16 +643,21 @@ export class App {
     m.startedAt = Date.now()
     m.acc = new PcmAccumulator(120)
     m.framesWhileIdle = 0
-    m.lastControl = 'pending'
+    m.lastFrameAt = 0
+    m.src = { ...NO_SRC }
+    m.lastDir = '-'
+    m.lastRole = '-'
+    m.alerted = false
+    m.lastControl = 'open -> pending'
     this.render()
     let r: unknown
     try {
-      r = await this.bridge.audioControl(true, m.source)
+      r = await this.bridge.audioControl(true, MIC_SOURCE)
     } catch (err) {
       r = `throw ${String(err).slice(0, 40)}`
     }
-    m.lastControl = `open ${String(r)}`
-    this.note(`rec start ${mode} src=${m.source} audioControl -> ${String(r)}`)
+    m.lastControl = `open -> ${String(r)}`
+    this.note(`rec start ${mode} src=${MIC_SOURCE} audioControl -> ${String(r)} ${this.device.conn} wear=${this.device.wear}`)
     this.render()
   }
 
@@ -593,13 +671,13 @@ export class App {
     } catch (err) {
       r = `throw ${String(err).slice(0, 40)}`
     }
-    m.lastControl = `close ${String(r)}`
+    m.lastControl = `close -> ${String(r)}`
     if (m.acc) {
       m.last = clipStats(m.acc)
-      m.lastSource = m.source
+      m.lastSrc = { ...m.src }
       const c = m.last
       this.note(
-        `rec stop ${reason} ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr wall ${((Date.now() - m.startedAt) / 1000).toFixed(2)}s rms ${formatDb(c.rmsDb)} peak ${formatDb(c.peakDb)}`,
+        `rec stop ${reason} ${c.seconds.toFixed(2)}s ${c.bytes}B ${c.frames}fr wall ${((Date.now() - m.startedAt) / 1000).toFixed(2)}s rms ${formatDb(c.rmsDb)} peak ${formatDb(c.peakDb)} ev-src ${srcSummary(m.src)} dir ${m.lastDir} role ${m.lastRole}`,
       )
     }
     this.render()

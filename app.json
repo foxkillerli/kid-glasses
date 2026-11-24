@@ -6,8 +6,7 @@
   "min_sdk_version": "0.0.16",
   "entrypoint": "index.html",
   "permissions": [
-    { "name": "g2-microphone", "desc": "M0 probe: capture audio from the G2 glasses mic to measure bytes, duration and level. Audio stays in memory on the phone." },
-    { "name": "phone-microphone", "desc": "M0 probe: compare the phone mic against the glasses mic. Audio stays in memory on the phone." },
+    { "name": "g2-microphone", "desc": "M0 probe: capture audio from the G2 glasses mic only (never the phone mic) to measure frames, bytes, duration and level. Audio stays in memory on the phone." },
     { "name": "network", "desc": "M0 probe: WebSocket echo on the plugin's own Cloudflare Worker, used to test whether a socket survives backgrounding.", "whitelist": ["https://kid-glasses-m0.your-subdomain.workers.dev", "wss://kid-glasses-m0.your-subdomain.workers.dev"] }
   ],
   "supported_languages": ["en", "zh"]
