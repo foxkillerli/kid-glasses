@@ -21,15 +21,15 @@ export type FrameVerdict =
   | { accept: false; reason: string }
 
 export function checkFrameSource(normalizedSource: unknown, raw: unknown): FrameVerdict {
+  if (normalizedSource !== MIC_SOURCE) return { accept: false, reason: `sdk-source:${String(normalizedSource)}` }
+  let labelled = false
   if (raw && typeof raw === 'object') {
     const r = raw as Record<string, unknown>
     for (const k of HOST_SOURCE_KEYS) {
       if (!(k in r)) continue
-      const v = r[k]
-      if (v === MIC_SOURCE) return normalizedSource === MIC_SOURCE ? { accept: true, hostLabel: 'glasses' } : { accept: false, reason: `sdk-source:${String(normalizedSource)}` }
-      return { accept: false, reason: `host-${k}:${String(v)}` }
+      if (r[k] !== MIC_SOURCE) return { accept: false, reason: `host-${k}:${String(r[k])}` }
+      labelled = true
     }
   }
-  if (normalizedSource !== MIC_SOURCE) return { accept: false, reason: `sdk-source:${String(normalizedSource)}` }
-  return { accept: true, hostLabel: 'absent' }
+  return { accept: true, hostLabel: labelled ? 'glasses' : 'absent' }
 }

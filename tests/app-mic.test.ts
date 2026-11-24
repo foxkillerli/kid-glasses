@@ -27,6 +27,9 @@ describe('checkFrameSource', () => {
     expect(checkFrameSource('glasses', { source: 'xyz' })).toEqual({ accept: false, reason: 'host-source:xyz' })
     expect(checkFrameSource('phone', {})).toEqual({ accept: false, reason: 'sdk-source:phone' })
     expect(checkFrameSource('glasses', { source: 1 })).toMatchObject({ accept: false })
+    expect(checkFrameSource('glasses', { source: 'glasses', audioSource: 'phone' })).toEqual({ accept: false, reason: 'host-audioSource:phone' })
+    expect(checkFrameSource('glasses', { audioSource: 'glasses', source: 'phone' })).toEqual({ accept: false, reason: 'host-source:phone' })
+    expect(checkFrameSource('glasses', { source: 'glasses', inputSource: 'glasses' })).toEqual({ accept: true, hostLabel: 'glasses' })
   })
 })
 
@@ -55,6 +58,7 @@ describe('App mic path end to end (fake bridge, real SDK event parsing)', () => 
     send(audio({ audioPcm: [9, 9, 9, 9], source: 'phone' }))
     send(audio({ audioPcm: [8, 8], audioSource: 'phone' }))
     send(audio({ audioPcm: [7, 7], source: 'mystery' }))
+    send(audio({ audioPcm: [6, 0], source: 'glasses', audioSource: 'phone' }))
 
     send({ sysEvent: { eventType: 4 } })
     await flush()
@@ -68,7 +72,7 @@ describe('App mic path end to end (fake bridge, real SDK event parsing)', () => 
     ])
     expect(Array.from(app.lastClipSamples() ?? [])).toEqual([1, 2, 3])
     const mic = (app as unknown as { mic: { dropped: number; lastDropReason: string } }).mic
-    expect(mic.dropped).toBe(3)
-    expect(mic.lastDropReason).toBe('host-source:mystery')
+    expect(mic.dropped).toBe(4)
+    expect(mic.lastDropReason).toBe('host-audioSource:phone')
   })
 })

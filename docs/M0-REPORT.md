@@ -13,7 +13,7 @@ Status: **M0 closed on 2026-11-25.** Both device batches are done.
 | CJK glyphs | OK on the lens | 真机主观通过、未精确测量 |
 | Text capacity | Simulator: ZH 28 per line, EN 52–59 per line, 8 body lines, 10 full-screen lines; the lens looked OK | Simulator measured; 真机主观通过、未精确测量 |
 | Gestures: tap, double, swipe, long-press / release | Used throughout both batches | 真机主观通过 |
-| Mic (glasses only) | Recording works | 真机主观通过、未精确测量; source not proven (see "Mic source") |
+| Mic (glasses only) | Recording works. **眼镜麦唯一来源：已通过 SDK 文档与代码确认；真机捂麦验证未执行（Fox 无法测试）** | 真机主观通过、未精确测量; source confirmed from code (see "Mic source evidence") |
 | Background: short | WebView reloads about 4–5 s after `visibility=hidden`; WS back in 98 ms; no lost ticks in foreground | Measured (batch 1) |
 | Background: long, and lock screen | OK per Fox | 真机主观通过、未精确测量 |
 
@@ -91,6 +91,73 @@ How the wrapper counts and where it can go wrong:
 - Known risk: capitals and digits are wider. In the pretext model 52 × `W` is 832 px and 52 digits are 584 px, so all-caps or long numbers can wrap on the lens earlier than counted, and a page can overflow its 8 lines. Pages built from Slack text should leave slack, or M1 should measure with pretext before going live.
 
 ## Mic source evidence
+
+> **眼镜麦唯一来源：已通过 SDK 文档与代码确认；真机捂麦验证未执行（Fox 无法测试）。**
+> Fox's instruction was: "你确保代码没问题就行".
+
+### Confirmation (2026-11-25)
+
+1. **Every mic call names the glasses explicitly.** The plugin calls `bridge.audioControl` in exactly one place, `src/lib/mic-control.ts`:
+   - `:3` defines `MIC_SOURCE = AudioInputSource.Glasses`.
+   - `:10` opens with `audioControl(true, MIC_SOURCE)`.
+   - `:14` closes with `audioControl(false, MIC_SOURCE)`.
+   - `src/app.ts` reaches the mic only through `openGlassesMic` (`:661` start, `:575` re-arm on `fgEnter`) and `closeGlassesMic` (`:676` stop).
+2. **No phone path is left.**
+   - `AudioInputSource.Phone` appears nowhere in `src/`.
+   - The mic page has no source switch; the swipe gesture was removed after batch 1.
+   - `app.json` declares only `g2-microphone` and `network`.
+   - The relay (`relay/src`) is a server. It only receives PCM frames from the device and never opens a mic.
+3. **No browser microphone APIs.** `getUserMedia`, `mediaDevices`, `AudioContext`, `MediaRecorder` and `navigator.` all have 0 hits in:
+   - `src/` and `index.html`;
+   - `relay/src`;
+   - the built `dist/assets/*.js`.
+
+   The SDK's own obfuscated bundle was checked separately. Its decoded string table has 1135 strings, and none of these appear in it.
+4. **What the SDK actually sends to the Even App.** I ran SDK 0.0.16's bundle in Node with a mocked `flutter_inappwebview.callHandler`:
+   - Our open and close calls produce `callHandler('evenAppMessage', {"type":"call_even_app_method","method":"audioControl","data":{"isOpen":true|false,"source":"glasses"}})`.
+   - Even `audioControl(false)` and `audioControl(true)` with no source send `"source":"glasses"`.
+5. **What the SDK and docs say.**
+   - Types: `index.d.ts:257-260` declares `enum AudioInputSource { Glasses = "glasses", Phone = "phone" }`, and `:1428` declares `audioControl(isOpen: boolean, source?: AudioInputSource)`.
+   - SDK README `:199`: "Default source: `AudioInputSource.Glasses`."
+   - device-apis: "Pick the source on every `audioControl(true, ...)` call - default is glasses if you omit the second arg."
+   - device-apis, Phone row: "routes through the phone the WebView lives on". That route is only taken with `AudioInputSource.Phone`, which we never pass.
+6. **Frames are filtered on the way in.** Codex round 1 found that a frame labelled `phone` was still recorded. Since `c3e1027`, `checkFrameSource` (`src/lib/mic-control.ts`) gates every frame:
+   - If the host sends any source field (`source`, `audioSource`, `audio_source`, `inputSource`, `input_source`), every one present must be exactly `glasses`. A conflicting pair such as `source=glasses, audioSource=phone` is rejected.
+   - If the host sends none, the SDK default must resolve to glasses.
+   - Anything else is dropped before it reaches the recording buffer. Dropped frames are counted and shown on the lens as `!! dropped N non-glasses (reason)`.
+7. **Regression tests.**
+   - `tests/mic-source.test.ts` mocks the bridge and asserts every call is `[open|close, 'glasses']`. It also scans the code statically: `audioControl` only in `mic-control.ts`; no `AudioInputSource` outside it; no `Phone`; no browser mic API in `src`, `index.html`, `relay/src` or `dist`; no `phone-microphone` permission.
+   - `tests/sdk-audio-wire.test.ts` pins the SDK's wire payload to `source: "glasses"`.
+   - `tests/app-mic.test.ts` drives the real `App`: menu → mic → hold → frames → `fgEnter` → release, with a fake bridge and SDK-parsed events. It asserts:
+     - the `audioControl` calls are exactly `[true, glasses]`, `[true, glasses]`, `[false, glasses]`;
+     - frames labelled `phone` or `mystery` are not recorded.
+   - Mutation checks:
+     - switching the close call to `Phone` fails 4 tests;
+     - adding a `getUserMedia` call fails the scan;
+     - disabling the gate fails the end-to-end test;
+     - using `Phone` on re-arm fails 3 tests.
+
+**Independent review (GPT via gpt-task, 2026-11-25): verdict NOT CONFIRMED, for host-side reasons only.**
+
+Round 1 confirmed:
+- every call requests glasses;
+- no phone UI or permission remains;
+- no browser mic API exists in `src`, `dist` or the SDK (it decoded all 1135 table entries);
+- the SDK wire payload is `source: "glasses"`.
+
+It found one plugin bug: a frame labelled `phone` was still recorded. Fixed in `c3e1027`.
+
+Round 2 confirmed that fix. It found that conflicting labels were still accepted; fixed in this commit, with tests.
+
+Its remaining reasons for "NOT CONFIRMED" are outside the plugin's control:
+
+1. **Unlabelled frames are accepted.** The simulator host sends frames with no source field, and the SDK documents `glasses` as the default. Rejecting them could stop recording entirely if the real host does not label frames either.
+2. **A label on the outer event envelope is invisible.** If the host put `phone` outside `jsonData`, the SDK would drop it before the plugin sees the event.
+3. **The physical mic is chosen by the host.** Native routing, fallback and permission enforcement in the Even App cannot be verified from plugin code.
+
+**Bottom line.** The plugin can only *request* the glasses mic and *refuse* frames labelled otherwise, and it does both, enforced by tests. Whether the Even App records from the glasses array when asked is a trust assumption on the host. Only a device check can settle it: phone mic covered, or the `host:` line read on the lens. That check was not run because Fox cannot do it.
+
+### Earlier analysis (batch 1)
 
 Sources:
 
@@ -174,7 +241,7 @@ Screenshots: `docs/screenshots/`.
 
 ## Open risks
 
-1. **Mic source is not proven.** `src=glasses` comes from the SDK's default for a missing field. Without the `host:` line from a real device and the physical check, a phone-mic path cannot be ruled out. The cheapest check is one recording with the phone mic covered, reading the `host:` line.
+1. **Mic source: confirmed from code, not on the device.** Every request to the host says `source: "glasses"` (see "Mic source evidence"). The physical check was not run because Fox cannot do it. The remaining trust assumption is that the Even App host honours the requested source.
 2. **The WebView reloads on background.** In batch 1, boot #2 came about 4–5 s after `visibility=hidden`. M1 must treat any background trip as a cold start:
    - keep session state on the relay;
    - reconnect quickly;
