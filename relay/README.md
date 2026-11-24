@@ -68,11 +68,11 @@ On a redeploy, do **not** resend the `v1` migration. Send migrations only when t
 | Plain message, `bot_message`, `me_message` from anyone but Fox | Forwarded to the glasses |
 | `thread_broadcast` | Forwarded once, with its `thread_ts` |
 | `file_share` | Text plus `[文件: name]`, or `[文件]` if the file has no name |
-| `message_changed` with new text | Appended as `（已修改）…`, with `edited: true` on the wire; history is not rewritten |
+| `message_changed` with new delivered text | Appended as `（已修改）…`, with `edited: true` on the wire; history is not rewritten. "Delivered text" is `text`, or attachment text when `text` is empty; unfurl previews are excluded. The hub also stores the last delivered text per message `ts`, so an edit with the same text is dropped even when `previous_message` is missing |
 | `message_changed` with the same text (e.g. unfurls) | Ignored |
 | `message_deleted` | Ignored |
 | Joins and other subtypes, hidden plain messages, empty text | Ignored |
-| Fox's own messages | Ignored: by `authorizations` user id in the router, by `auth.test` user id in the hub, and any text starting with `〔眼镜〕` |
+| Fox's own messages | Ignored: by `authorizations` user id in the router, by `auth.test` user id in the hub, and any text starting with `〔眼镜〕` from a sender not verified by the allowlist. A pinned Kid reply that starts with the prefix is still forwarded |
 | Optional allowlist `KID_BOT_ID` (`B…`) / `KID_BOT_USER_ID` (`U…`) | Plain vars, not secrets. When either is set, only that sender is forwarded |
 
 The hub logs each new Kid sender pair once, as `kid sender user=… bot=…`. It logs ids only, never text, so the allowlist values can be read from the Worker's real-time logs.
@@ -80,7 +80,8 @@ The hub logs each new Kid sender pair once, as `kid sender user=… bot=…`. It
 **Session matching.** When the first glasses post of a session opens a thread, the hub stores `thread:<ts> → session`.
 
 - A Kid reply with `thread_ts` goes to the session that owns that thread, even if a newer session has started.
-- A top-level reply goes to the active session, or to none once it has expired.
+- A top-level reply goes to the active session, or to none once it has expired. Only replies assigned to the active session extend its idle timer.
+- Kid messages are processed one at a time (their own queue, separate from posts), so a Slack retry that arrives while `auth.test` is pending is delivered once.
 - `msg` frames carry `session`.
 
 ## Configuration

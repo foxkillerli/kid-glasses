@@ -51,7 +51,7 @@ describe('HubCore', () => {
 
   it('pushes Kid replies to the device once, sanitised, and stores them in history', async () => {
     const { core, device } = setup()
-    const msg = { eventId: 'Ev1', channel: 'D0123ABCDEF', user: 'UKID', text: '*三点半* 放学 :smile:', ts: '1.2', threadTs: null, botId: null, kind: 'message' as const }
+    const msg = { eventId: 'Ev1', channel: 'D0123ABCDEF', user: 'UKID', text: '*三点半* 放学 :smile:', ts: '1.2', threadTs: null, botId: null, kind: 'message' as const, verifiedKid: false }
     await core.onKidMessage(msg)
     await core.onKidMessage(msg)
     expect(device.of('msg')).toEqual([{ t: 'msg', seq: 1, from: 'kid', text: '三点半 放学', at: 1_000_000, session: null }])
@@ -61,7 +61,7 @@ describe('HubCore', () => {
 
   it('replays missed messages after hello with lastSeq', async () => {
     const { core, device } = setup()
-    for (const id of ['E1', 'E2', 'E3']) await core.onKidMessage({ eventId: id, channel: 'D0123ABCDEF', user: 'U', text: id, ts: id, threadTs: null, botId: null, kind: 'message' as const })
+    for (const id of ['E1', 'E2', 'E3']) await core.onKidMessage({ eventId: id, channel: 'D0123ABCDEF', user: 'U', text: id, ts: id, threadTs: null, botId: null, kind: 'message' as const, verifiedKid: false })
     await core.onDeviceMessage(device, JSON.stringify({ t: 'hello', lastSeq: 1 }))
     expect(device.of('hello')[0]).toMatchObject({ lastSeq: 3, fastLane: false })
     expect(device.of('msg').slice(-2).map(m => m.text)).toEqual(['E2', 'E3'])
@@ -194,7 +194,7 @@ describe('HubCore review fixes', () => {
   it('F1: an unauthenticated socket gets nothing until it sends the token in the first frame', async () => {
     const stranger = new FakeDevice(false)
     const { c } = core({}, [stranger])
-    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'secret news', ts: '1', threadTs: null, botId: null, kind: 'message' as const })
+    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'secret news', ts: '1', threadTs: null, botId: null, kind: 'message' as const, verifiedKid: false })
     expect(stranger.sent).toEqual([])
     await c.onDeviceMessage(stranger, JSON.stringify({ t: 'history' }))
     expect(stranger.closed).toEqual({ code: 4401, reason: 'unauthorized' })
@@ -251,7 +251,7 @@ describe('HubCore review fixes', () => {
     const { c, posts, advance } = core({}, [new FakeDevice()])
     await c.sayFromGlasses('one')
     advance(SESSION_IDLE_MS + 1)
-    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'late', ts: '2', threadTs: '9.0', botId: null, kind: 'message' as const })
+    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'late', ts: '2', threadTs: '9.0', botId: null, kind: 'message' as const, verifiedKid: false })
     await c.sayFromGlasses('two')
     expect(posts.map(p => p.threadTs)).toEqual([null, null])
   })
@@ -259,7 +259,7 @@ describe('HubCore review fixes', () => {
   it('F4: hello replays every retained message after lastSeq, beyond one page', async () => {
     const d = new FakeDevice()
     const { c } = core({}, [])
-    for (let i = 1; i <= 120; i++) await c.onKidMessage({ eventId: `E${i}`, channel: 'D0123ABCDEF', user: 'U', text: `m${i}`, ts: `${i}`, threadTs: null, botId: null, kind: 'message' as const })
+    for (let i = 1; i <= 120; i++) await c.onKidMessage({ eventId: `E${i}`, channel: 'D0123ABCDEF', user: 'U', text: `m${i}`, ts: `${i}`, threadTs: null, botId: null, kind: 'message' as const, verifiedKid: false })
     await c.onDeviceMessage(d, JSON.stringify({ t: 'hello', lastSeq: 0 }))
     const seqs = d.of('msg').map(m => m.seq)
     expect(seqs).toHaveLength(120)
@@ -330,7 +330,7 @@ describe('HubCore review round 2', () => {
     })
     return { c, storage, device, posts }
   }
-  const kid = (eventId: string, user = 'UKID0001', text = 'hi') => ({ eventId, channel: 'D0123ABCDEF', user, text, ts: '1', threadTs: null, botId: null, kind: 'message' as const })
+  const kid = (eventId: string, user = 'UKID0001', text = 'hi') => ({ eventId, channel: 'D0123ABCDEF', user, text, ts: '1', threadTs: null, botId: null, kind: 'message' as const, verifiedKid: false })
 
   it('F2: history and the seen marker are written together, so a retry after a failed write stores the reply once', async () => {
     const { c, storage } = core2()
@@ -425,6 +425,7 @@ describe('HubCore bot-DM model', () => {
     ts: '1700000001.000000',
     threadTs: null,
     kind: 'message',
+    verifiedKid: false,
     ...over,
   })
 
@@ -490,9 +491,73 @@ describe('HubCore kid sender logging', () => {
       now: () => 1,
       log: m => logs.push(m),
     })
-    const m = (eventId: string, text: string) => ({ eventId, channel: 'D0123ABCDEF', user: 'U0KIDBOT01', botId: 'B0KIDBOT01', text, ts: '1', threadTs: null, kind: 'message' as const })
+    const m = (eventId: string, text: string) => ({ eventId, channel: 'D0123ABCDEF', user: 'U0KIDBOT01', botId: 'B0KIDBOT01', text, ts: '1', threadTs: null, kind: 'message' as const, verifiedKid: false })
     await c.onKidMessage(m('E1', 'secret homework answer'))
     await c.onKidMessage(m('E2', 'second'))
     expect(logs).toEqual(['kid sender user=U0KIDBOT01 bot=B0KIDBOT01'])
   })
 })
+
+describe('HubCore bot-DM review fixes', () => {
+  function core4(selfUserId: () => Promise<string | null> = async () => 'UFOX0001') {
+    let now = 1_000_000
+    let n = 0
+    const device = new FakeDevice()
+    const c = new HubCore({
+      storage: new FakeStorage(),
+      sockets: () => [device],
+      slack: { selfUserId, postToKid: async () => ({ ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }) },
+      asr: null,
+      fastLane: DISABLED_FAST_LANE,
+      now: () => now,
+    })
+    return { c, device, advance: (ms: number) => (now += ms) }
+  }
+  const km = (over: Partial<KidMessage>): KidMessage => ({
+    eventId: 'E0', channel: 'D0123ABCDEF', user: null, botId: 'B0KIDBOT01', text: 'r', ts: '1700000009.000000', threadTs: null, kind: 'message', verifiedKid: false, ...over,
+  })
+
+  it('F1: a verified Kid reply starting with 〔眼镜〕 reaches the glasses; an unverified one does not', async () => {
+    const { c, device } = core4()
+    await c.onKidMessage(km({ eventId: 'E1', text: '〔眼镜〕unverified' }))
+    await c.onKidMessage(km({ eventId: 'E2', text: '〔眼镜〕verified', verifiedKid: true }))
+    expect(device.of('msg').map(m => m.text)).toEqual(['〔眼镜〕verified'])
+  })
+
+  it('F2: an edit whose delivered text did not change is not appended again (no previous_message case)', async () => {
+    const { c, device } = core4()
+    await c.onKidMessage(km({ eventId: 'E1', text: '三点', ts: '5.1' }))
+    await c.onKidMessage(km({ eventId: 'E2', text: '三点', ts: '5.1', kind: 'edit' }))
+    await c.onKidMessage(km({ eventId: 'E3', text: '三点半', ts: '5.1', kind: 'edit' }))
+    await c.onKidMessage(km({ eventId: 'E4', text: '三点半', ts: '5.1', kind: 'edit' }))
+    expect(device.of('msg').map(m => m.text)).toEqual(['三点', '（已修改）三点半'])
+  })
+
+  it('F3: a reply in an old session thread does not extend the active session', async () => {
+    const { c, device, advance } = core4()
+    await c.sayFromGlasses('A')
+    advance(SESSION_IDLE_MS + 1)
+    await c.sayFromGlasses('B')
+    const b = (await c.history.page(null, 1)).items[0].session
+    advance(SESSION_IDLE_MS - 1000)
+    await c.onKidMessage(km({ eventId: 'E1', text: 'late answer to A', threadTs: '1700000000.000' }))
+    advance(2000)
+    await c.onKidMessage(km({ eventId: 'E2', text: 'top-level after B expired' }))
+    const msgs = device.of('msg').map(m => [m.text, m.session])
+    expect(msgs[0][1]).not.toBe(b)
+    expect(msgs[1]).toEqual(['top-level after B expired', null])
+  })
+
+  it('F4: a Slack retry arriving while auth.test is pending is delivered once', async () => {
+    let release: (v: string) => void = () => {}
+    const pending = new Promise<string>(r => (release = r))
+    const { c, device } = core4(() => pending)
+    const first = c.onKidMessage(km({ eventId: 'E9', user: 'U0KIDBOT01', text: 'edited', kind: 'edit' }))
+    const retry = c.onKidMessage(km({ eventId: 'E9', user: 'U0KIDBOT01', text: 'edited', kind: 'edit' }))
+    await flush()
+    release('UFOX0001')
+    await Promise.all([first, retry])
+    expect(device.of('msg')).toHaveLength(1)
+  })
+})
+

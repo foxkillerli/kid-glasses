@@ -27,7 +27,7 @@ describe('routeSlackEvent: bot-DM model', () => {
     const r = routeSlackEvent(env({ ...kidBot, thread_ts: '1700000000.000100' }), KID)
     expect(r).toEqual({
       kind: 'kid-message',
-      message: { eventId: 'Ev1', channel: KID, user: null, botId: KID_BOT, text: '三点放学', ts: '1700000000.000200', threadTs: '1700000000.000100', kind: 'message' },
+      message: { eventId: 'Ev1', channel: KID, user: null, botId: KID_BOT, text: '三点放学', ts: '1700000000.000200', threadTs: '1700000000.000100', kind: 'message', verifiedKid: false },
     })
   })
 
@@ -101,5 +101,20 @@ describe('routeSlackEvent: bot-DM model', () => {
     expect(routeSlackEvent(env({ ...kidBot, bot_id: 'BOTHER0001' }), KID, { botId: KID_BOT })).toEqual({ kind: 'ignore', reason: 'not-kid' })
     expect(routeSlackEvent(env({ user: 'USOMEONE01', text: 'x', ts: '1' }), KID, { botId: KID_BOT })).toEqual({ kind: 'ignore', reason: 'not-kid' })
     expect(routeSlackEvent(env({ user: KID_BOT_USER, text: 'x', ts: '1' }), KID, { userId: KID_BOT_USER }).kind).toBe('kid-message')
+  })
+
+  it('F1: with a pinned Kid identity, a verified Kid reply starting with 〔眼镜〕 is still forwarded', () => {
+    const r = routeSlackEvent(env({ ...kidBot, text: '〔眼镜〕我刚收到这条' }), KID, { botId: KID_BOT })
+    expect(r).toMatchObject({ kind: 'kid-message', message: { verifiedKid: true, text: '〔眼镜〕我刚收到这条' } })
+    expect(routeSlackEvent(env({ user: 'UOTHER0001', text: '〔眼镜〕x', ts: '1' }), KID, { botId: KID_BOT })).toEqual({ kind: 'ignore', reason: 'not-kid' })
+  })
+
+  it('F2: compares the delivered text of an edit, including attachment-only text, and ignores unfurl attachments', () => {
+    const before = { subtype: 'bot_message', bot_id: KID_BOT, text: '', attachments: [{ fallback: '三点' }], ts: '1.9' }
+    const after = { ...before, attachments: [{ fallback: '三点半' }] }
+    expect(routeSlackEvent(env({ subtype: 'message_changed', message: after, previous_message: before }), KID)).toMatchObject({ kind: 'kid-message', message: { kind: 'edit', text: '三点半' } })
+    const unfurled = { ...kidBot, attachments: [{ from_url: 'https://x.y', fallback: 'preview' }] }
+    expect(routeSlackEvent(env({ subtype: 'message_changed', message: unfurled, previous_message: kidBot }), KID)).toEqual({ kind: 'ignore', reason: 'edit-unchanged' })
+    expect(routeSlackEvent(env({ subtype: 'message_changed', message: { ...kidBot } }), KID)).toMatchObject({ kind: 'kid-message', message: { kind: 'edit' } })
   })
 })

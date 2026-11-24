@@ -11,6 +11,7 @@ export interface KidMessage {
   ts: string
   threadTs: string | null
   kind: KidMessageKind
+  verifiedKid: boolean
 }
 
 export interface KidAllowlist {
@@ -44,6 +45,7 @@ function installerUserIds(body: Obj): Set<string> {
 function attachmentText(m: Obj): string {
   const atts = Array.isArray(m.attachments) ? (m.attachments as Obj[]) : []
   return atts
+    .filter(a => !a.from_url && !a.is_app_unfurl)
     .map(a => str(a.text) ?? str(a.fallback) ?? '')
     .filter(Boolean)
     .join('\n')
@@ -53,6 +55,10 @@ function filePlaceholder(m: Obj): string {
   const files = Array.isArray(m.files) ? (m.files as Obj[]) : []
   const names = files.map(f => str(f.name) ?? str(f.title)).filter((n): n is string => !!n)
   return names.length ? `[文件: ${names.join(', ')}]` : '[文件]'
+}
+
+export function effectiveText(m: Obj): string {
+  return str(m.text) ?? attachmentText(m)
 }
 
 export function startsWithGlassesPrefix(text: string): boolean {
@@ -77,8 +83,8 @@ export function routeSlackEvent(body: unknown, kidChannelId: string | undefined,
   if (subtype === 'message_changed') {
     if (!e.message || typeof e.message !== 'object') return { kind: 'ignore', reason: 'edit-without-message' }
     m = e.message as Obj
-    const prev = (e.previous_message ?? {}) as Obj
-    if ((str(m.text) ?? '') === (str(prev.text) ?? '')) return { kind: 'ignore', reason: 'edit-unchanged' }
+    const prev = e.previous_message && typeof e.previous_message === 'object' ? (e.previous_message as Obj) : null
+    if (prev && effectiveText(m) === effectiveText(prev)) return { kind: 'ignore', reason: 'edit-unchanged' }
     kind = 'edit'
   } else if (subtype === 'file_share') {
     m = e
@@ -94,12 +100,11 @@ export function routeSlackEvent(body: unknown, kidChannelId: string | undefined,
   const user = str(m.user)
   const botId = str(m.bot_id)
   if (user && installerUserIds(b).has(user)) return { kind: 'ignore', reason: 'own-message' }
-  let text = str(m.text) ?? attachmentText(m)
-  if (startsWithGlassesPrefix(text)) return { kind: 'ignore', reason: 'glasses-echo' }
-  if (allow.botId || allow.userId) {
-    const isKid = (!!allow.botId && botId === allow.botId) || (!!allow.userId && user === allow.userId)
-    if (!isKid) return { kind: 'ignore', reason: 'not-kid' }
-  }
+  let text = effectiveText(m)
+  const pinned = !!(allow.botId || allow.userId)
+  const verifiedKid = pinned && ((!!allow.botId && botId === allow.botId) || (!!allow.userId && user === allow.userId))
+  if (pinned && !verifiedKid) return { kind: 'ignore', reason: 'not-kid' }
+  if (!verifiedKid && startsWithGlassesPrefix(text)) return { kind: 'ignore', reason: 'glasses-echo' }
   if (kind === 'file') text = text.trim() ? `${text}\n${filePlaceholder(m)}` : filePlaceholder(m)
   if (!text.trim()) return { kind: 'ignore', reason: 'empty' }
   const ts = str(m.ts)
@@ -107,6 +112,6 @@ export function routeSlackEvent(body: unknown, kidChannelId: string | undefined,
   const eventId = str(b.event_id) ?? `${kind}:${ts}:${str(e.event_ts) ?? ''}`
   return {
     kind: 'kid-message',
-    message: { eventId, channel: kidChannelId, user, botId, text, ts, threadTs: str(m.thread_ts), kind },
+    message: { eventId, channel: kidChannelId, user, botId, text, ts, threadTs: str(m.thread_ts), kind, verifiedKid },
   }
 }

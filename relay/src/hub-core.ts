@@ -41,6 +41,7 @@ export interface Session {
 export const SESSION_KEY = 'meta:session'
 export const SEEN_KEY = 'meta:seen'
 export const THREAD_PREFIX = 'thread:'
+export const DELIVERED_PREFIX = 'delivered:'
 export const EDITED_MARK = '（已修改）'
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SEEN_CAP = 200
@@ -69,6 +70,7 @@ export class HubCore {
   readonly history: HistoryStore
   private turn: AsrTurn | null = null
   private queue: Promise<unknown> = Promise.resolve()
+  private kidQueue: Promise<unknown> = Promise.resolve()
   private readonly kidSendersLogged = new Set<string>()
   private turnChain: Promise<unknown> = Promise.resolve()
 
@@ -246,13 +248,22 @@ export class HubCore {
     return item
   }
 
-  async onKidMessage(msg: KidMessage): Promise<HistoryItem | null> {
+  onKidMessage(msg: KidMessage): Promise<HistoryItem | null> {
+    const run = this.kidQueue.then(() => this.handleKidMessage(msg))
+    this.kidQueue = run.catch(() => null)
+    return run
+  }
+
+  private async handleKidMessage(msg: KidMessage): Promise<HistoryItem | null> {
     const seen = (await this.deps.storage.get<string[]>(SEEN_KEY)) ?? []
     if (seen.includes(msg.eventId)) return null
     const nextSeen = [...seen, msg.eventId].slice(-SEEN_CAP)
     const self = msg.user ? await this.deps.slack.selfUserId() : null
     const body = fromSlack(msg.text)
-    if ((self && msg.user === self) || isFromGlasses(msg.text.trimStart()) || !body) {
+    const echo = !msg.verifiedKid && isFromGlasses(msg.text.trimStart())
+    const deliveredKey = DELIVERED_PREFIX + msg.ts
+    const unchangedEdit = msg.kind === 'edit' && (await this.deps.storage.get<string>(deliveredKey)) === body
+    if ((self && msg.user === self) || echo || !body || unchangedEdit) {
       await this.deps.storage.put(SEEN_KEY, nextSeen)
       return null
     }
@@ -265,14 +276,16 @@ export class HubCore {
     const session = await this.sessionForThread(msg.threadTs)
     const item = await this.history.append(
       { from: 'kid', text: edited ? EDITED_MARK + body : body, slackTs: msg.ts, threadTs: msg.threadTs, session, ...(edited ? { edited: true } : {}), at: this.deps.now() },
-      { [SEEN_KEY]: nextSeen },
+      { [SEEN_KEY]: nextSeen, [deliveredKey]: body },
     )
     this.broadcast({ t: 'msg', ...this.toWire(item) })
-    void this.enqueue(async () => {
-      const now = this.deps.now()
-      const s = await this.deps.storage.get<Session>(SESSION_KEY)
-      if (this.isLive(s, now)) await this.deps.storage.put(SESSION_KEY, { ...s, lastAt: now })
-    })
+    if (session) {
+      void this.enqueue(async () => {
+        const now = this.deps.now()
+        const s = await this.deps.storage.get<Session>(SESSION_KEY)
+        if (this.isLive(s, now) && s.id === session) await this.deps.storage.put(SESSION_KEY, { ...s, lastAt: now })
+      })
+    }
     return item
   }
 
