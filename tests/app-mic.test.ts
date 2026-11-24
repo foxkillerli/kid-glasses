@@ -47,6 +47,8 @@ describe('App mic path end to end (fake bridge, real SDK event parsing)', () => 
     const app = new App(bridge, { render() {} }, null)
     const send = (ev: Record<string, unknown>) => (app as unknown as { onEvent(e: unknown): void }).onEvent(ev)
 
+    send({ sysEvent: { eventType: 3 } })
+    send({ textEvent: { eventType: 2 } })
     send({ textEvent: { eventType: 2 } })
     send({ textEvent: { eventType: 2 } })
     send({ sysEvent: {} })

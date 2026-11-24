@@ -1,13 +1,28 @@
 {
   "package_id": "com.foxkiller.kidglasses",
   "edition": "202601",
-  "name": "Kid Glasses M0",
-  "version": "0.0.1",
+  "name": "Kid Glasses M1",
+  "version": "0.0.2",
   "min_sdk_version": "0.0.16",
   "entrypoint": "index.html",
   "permissions": [
-    { "name": "g2-microphone", "desc": "M0 probe: capture audio from the G2 glasses mic only (never the phone mic) to measure frames, bytes, duration and level. Audio stays in memory on the phone." },
-    { "name": "network", "desc": "M0 probe: WebSocket echo on the plugin's own Cloudflare Worker, used to test whether a socket survives backgrounding.", "whitelist": ["https://kid-glasses-m0.your-subdomain.workers.dev", "wss://kid-glasses-m0.your-subdomain.workers.dev"] }
+    {
+      "name": "g2-microphone",
+      "desc": "Capture speech from the G2 glasses mic only (never the phone mic) while you hold to talk; the audio is streamed to the kid-glasses relay for transcription and not stored on the phone."
+    },
+    {
+      "name": "network",
+      "desc": "Talk to the kid-glasses relay (pairing, WebSocket for messages and speech) and the plugin's own Cloudflare Worker.",
+      "whitelist": [
+        "https://kid-glasses-m0.your-subdomain.workers.dev",
+        "wss://kid-glasses-m0.your-subdomain.workers.dev",
+        "https://kid-glasses-relay.your-subdomain.workers.dev",
+        "wss://kid-glasses-relay.your-subdomain.workers.dev"
+      ]
+    }
   ],
-  "supported_languages": ["en", "zh"]
+  "supported_languages": [
+    "en",
+    "zh"
+  ]
 }
