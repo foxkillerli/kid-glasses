@@ -28,7 +28,7 @@ export async function handleSlackEvents(request: Request, env: Env, nowSeconds: 
   } catch {
     return new Response('bad json', { status: 400 })
   }
-  const route = routeSlackEvent(parsed, env.KID_DM_CHANNEL_ID)
+  const route = routeSlackEvent(parsed, env.KID_DM_CHANNEL_ID, { botId: env.KID_BOT_ID || undefined, userId: env.KID_BOT_USER_ID || undefined })
   if (route.kind === 'challenge') return new Response(route.challenge, { headers: { 'Content-Type': 'text/plain' } })
   if (route.kind === 'ignore') return new Response(`ignored: ${route.reason}`)
   try {

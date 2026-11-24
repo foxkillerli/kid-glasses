@@ -3,59 +3,103 @@ import { routeSlackEvent } from '../src/slack-events'
 
 const KID = 'D0123ABCDEF'
 const FOX = 'UFOX12345'
+const KID_BOT = 'B0KIDBOT01'
+const KID_BOT_USER = 'U0KIDBOT01'
 
-function msg(event: Record<string, unknown>, extra: Record<string, unknown> = {}) {
+function env(event: Record<string, unknown>, extra: Record<string, unknown> = {}) {
   return {
     type: 'event_callback',
     event_id: 'Ev1',
     authorizations: [{ user_id: FOX, is_bot: false }],
-    event: { type: 'message', channel: KID, channel_type: 'im', user: 'UKID00001', text: '你好', ts: '1700000000.000100', ...event },
+    event: { type: 'message', channel: KID, channel_type: 'im', ...event },
     ...extra,
   }
 }
 
-describe('routeSlackEvent', () => {
+const kidBot = { subtype: 'bot_message', bot_id: KID_BOT, text: '三点放学', ts: '1700000000.000200' }
+
+describe('routeSlackEvent: bot-DM model', () => {
   it('answers url_verification with the challenge', () => {
     expect(routeSlackEvent({ type: 'url_verification', challenge: 'abc123' }, KID)).toEqual({ kind: 'challenge', challenge: 'abc123' })
   })
 
-  it('routes a Kid DM message to the device, keeping thread_ts', () => {
-    const r = routeSlackEvent(msg({ thread_ts: '1700000000.000001' }), KID)
+  it('forwards a Kid bot reply (bot_message with bot_id), keeping thread_ts', () => {
+    const r = routeSlackEvent(env({ ...kidBot, thread_ts: '1700000000.000100' }), KID)
     expect(r).toEqual({
       kind: 'kid-message',
-      message: { eventId: 'Ev1', channel: KID, user: 'UKID00001', text: '你好', ts: '1700000000.000100', threadTs: '1700000000.000001' },
+      message: { eventId: 'Ev1', channel: KID, user: null, botId: KID_BOT, text: '三点放学', ts: '1700000000.000200', threadTs: '1700000000.000100', kind: 'message' },
     })
   })
 
-  it('accepts messages from a bot user in the Kid DM', () => {
-    expect(routeSlackEvent(msg({ subtype: 'bot_message', user: undefined, bot_id: 'B1' }), KID).kind).toBe('kid-message')
+  it('forwards a Kid bot reply that carries a bot user id and no subtype', () => {
+    const r = routeSlackEvent(env({ user: KID_BOT_USER, bot_id: KID_BOT, text: 'ok', ts: '1.2' }), KID)
+    expect(r).toMatchObject({ kind: 'kid-message', message: { user: KID_BOT_USER, botId: KID_BOT, kind: 'message' } })
   })
 
-  it('ignores other channels, other event types, edits/deletes, hidden and empty messages', () => {
-    expect(routeSlackEvent(msg({ channel: 'D9999999999' }), KID)).toEqual({ kind: 'ignore', reason: 'other-channel' })
-    expect(routeSlackEvent(msg({ channel: 'C0123ABCDEF', channel_type: 'channel' }), KID)).toEqual({ kind: 'ignore', reason: 'other-channel' })
-    expect(routeSlackEvent(msg({ type: 'reaction_added' }), KID).kind).toBe('ignore')
-    expect(routeSlackEvent(msg({ subtype: 'message_changed' }), KID)).toEqual({ kind: 'ignore', reason: 'subtype:message_changed' })
-    expect(routeSlackEvent(msg({ subtype: 'message_deleted' }), KID).kind).toBe('ignore')
-    expect(routeSlackEvent(msg({ hidden: true }), KID).kind).toBe('ignore')
-    expect(routeSlackEvent(msg({ text: '   ' }), KID)).toEqual({ kind: 'ignore', reason: 'empty' })
+  it('uses attachment text when a bot message has no top-level text', () => {
+    const r = routeSlackEvent(env({ subtype: 'bot_message', bot_id: KID_BOT, text: '', attachments: [{ fallback: '明天带伞' }], ts: '1.3' }), KID)
+    expect(r).toMatchObject({ kind: 'kid-message', message: { text: '明天带伞' } })
   })
 
-  it("ignores Fox's own messages by installer user id", () => {
-    expect(routeSlackEvent(msg({ user: FOX }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+  it('only considers the Kid DM channel', () => {
+    expect(routeSlackEvent(env({ ...kidBot, channel: 'D9999999999' }), KID)).toEqual({ kind: 'ignore', reason: 'other-channel' })
+    expect(routeSlackEvent(env({ ...kidBot, channel: 'C0123ABCDEF', channel_type: 'channel' }), KID)).toEqual({ kind: 'ignore', reason: 'other-channel' })
+    expect(routeSlackEvent(env(kidBot), undefined)).toEqual({ kind: 'ignore', reason: 'kid-channel-not-configured' })
   })
 
-  it('delivers a Kid reply that happens to start with 〔眼镜〕', () => {
-    expect(routeSlackEvent(msg({ user: 'UKID00001', text: '〔眼镜〕你刚才说的我收到了' }), KID).kind).toBe('kid-message')
+  it("never echoes Fox's own messages: by installer id, and by the 〔眼镜〕 prefix", () => {
+    expect(routeSlackEvent(env({ user: FOX, text: 'hi', ts: '1.4' }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+    expect(routeSlackEvent(env({ user: 'UOTHER0001', text: '〔眼镜〕今天几点放学', ts: '1.5' }, { authorizations: [] }), KID)).toEqual({ kind: 'ignore', reason: 'glasses-echo' })
+    expect(routeSlackEvent(env({ ...kidBot, text: '  〔眼镜〕quoted' }), KID)).toEqual({ kind: 'ignore', reason: 'glasses-echo' })
   })
 
-  it('never filters on the 〔眼镜〕 prefix, even without authorizations (the hub checks the sender id)', () => {
-    expect(routeSlackEvent(msg({ text: '〔眼镜〕hi' }, { authorizations: [] }), KID).kind).toBe('kid-message')
+  it('forwards an edit of a Kid reply as kind "edit", using the new text and the original ts', () => {
+    const r = routeSlackEvent(
+      env({
+        subtype: 'message_changed',
+        hidden: true,
+        message: { ...kidBot, text: '三点半放学', thread_ts: '1700000000.000100' },
+        previous_message: { ...kidBot },
+      }),
+      KID,
+    )
+    expect(r).toMatchObject({ kind: 'kid-message', message: { kind: 'edit', text: '三点半放学', ts: '1700000000.000200', threadTs: '1700000000.000100', botId: KID_BOT } })
   })
 
-  it('ignores everything when the Kid channel is not configured', () => {
-    expect(routeSlackEvent(msg({}), undefined)).toEqual({ kind: 'ignore', reason: 'kid-channel-not-configured' })
-    expect(routeSlackEvent({ type: 'app_rate_limited' }, KID).kind).toBe('ignore')
+  it('ignores edits that do not change the text (unfurls), edits by Fox, and deletes', () => {
+    expect(routeSlackEvent(env({ subtype: 'message_changed', message: { ...kidBot }, previous_message: { ...kidBot } }), KID)).toEqual({ kind: 'ignore', reason: 'edit-unchanged' })
+    expect(routeSlackEvent(env({ subtype: 'message_changed', message: { user: FOX, text: 'b', ts: '1' }, previous_message: { user: FOX, text: 'a' } }), KID)).toEqual({ kind: 'ignore', reason: 'own-message' })
+    expect(routeSlackEvent(env({ subtype: 'message_changed', message: { user: FOX, text: '〔眼镜〕b', ts: '1' }, previous_message: { text: '〔眼镜〕a' } }, { authorizations: [] }), KID)).toEqual({ kind: 'ignore', reason: 'glasses-echo' })
+    expect(routeSlackEvent(env({ subtype: 'message_deleted', deleted_ts: '1.2', previous_message: kidBot }), KID)).toEqual({ kind: 'ignore', reason: 'deleted' })
+    expect(routeSlackEvent(env({ subtype: 'message_changed' }), KID)).toEqual({ kind: 'ignore', reason: 'edit-without-message' })
+  })
+
+  it('shows a short placeholder for file shares', () => {
+    expect(routeSlackEvent(env({ subtype: 'file_share', user: KID_BOT_USER, text: '', files: [{ name: 'homework.pdf' }], ts: '1.6' }), KID)).toMatchObject({
+      kind: 'kid-message',
+      message: { kind: 'file', text: '[文件: homework.pdf]' },
+    })
+    expect(routeSlackEvent(env({ subtype: 'file_share', user: KID_BOT_USER, text: '看这个', files: [{}], ts: '1.7' }), KID)).toMatchObject({
+      message: { text: '看这个\n[文件]' },
+    })
+  })
+
+  it('forwards thread_broadcast once as a normal message with its thread_ts', () => {
+    expect(routeSlackEvent(env({ ...kidBot, subtype: 'thread_broadcast', thread_ts: '1.0' }), KID)).toMatchObject({ kind: 'kid-message', message: { kind: 'message', threadTs: '1.0' } })
+  })
+
+  it('ignores joins, hidden plain messages, empty text and unknown event types', () => {
+    expect(routeSlackEvent(env({ subtype: 'channel_join', user: 'U1', text: 'joined', ts: '1' }), KID).kind).toBe('ignore')
+    expect(routeSlackEvent(env({ ...kidBot, hidden: true }), KID)).toEqual({ kind: 'ignore', reason: 'hidden' })
+    expect(routeSlackEvent(env({ ...kidBot, text: '   ' }), KID)).toEqual({ kind: 'ignore', reason: 'empty' })
+    expect(routeSlackEvent(env({ type: 'reaction_added' }), KID).kind).toBe('ignore')
     expect(routeSlackEvent(null, KID).kind).toBe('ignore')
+  })
+
+  it('with an allowlist (KID_BOT_ID / KID_BOT_USER_ID), forwards only the pinned Kid identity', () => {
+    expect(routeSlackEvent(env(kidBot), KID, { botId: KID_BOT }).kind).toBe('kid-message')
+    expect(routeSlackEvent(env({ ...kidBot, bot_id: 'BOTHER0001' }), KID, { botId: KID_BOT })).toEqual({ kind: 'ignore', reason: 'not-kid' })
+    expect(routeSlackEvent(env({ user: 'USOMEONE01', text: 'x', ts: '1' }), KID, { botId: KID_BOT })).toEqual({ kind: 'ignore', reason: 'not-kid' })
+    expect(routeSlackEvent(env({ user: KID_BOT_USER, text: 'x', ts: '1' }), KID, { userId: KID_BOT_USER }).kind).toBe('kid-message')
   })
 })

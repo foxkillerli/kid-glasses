@@ -3,6 +3,7 @@ import { DISABLED_FAST_LANE, type FastLane } from '../src/fast-lane'
 import { HubCore, SESSION_IDLE_MS, type HubDeps } from '../src/hub-core'
 import { CLOSE_STREAM } from '../src/deepgram'
 import { ChannelNotAllowedError } from '../src/slack-client'
+import type { KidMessage } from '../src/slack-events'
 import { FakeAsr, FakeDevice, FakeStorage, flush } from './fakes'
 
 function setup(over: Partial<HubDeps> = {}) {
@@ -50,17 +51,17 @@ describe('HubCore', () => {
 
   it('pushes Kid replies to the device once, sanitised, and stores them in history', async () => {
     const { core, device } = setup()
-    const msg = { eventId: 'Ev1', channel: 'D0123ABCDEF', user: 'UKID', text: '*三点半* 放学 :smile:', ts: '1.2', threadTs: null }
+    const msg = { eventId: 'Ev1', channel: 'D0123ABCDEF', user: 'UKID', text: '*三点半* 放学 :smile:', ts: '1.2', threadTs: null, botId: null, kind: 'message' as const }
     await core.onKidMessage(msg)
     await core.onKidMessage(msg)
-    expect(device.of('msg')).toEqual([{ t: 'msg', seq: 1, from: 'kid', text: '三点半 放学', at: 1_000_000 }])
+    expect(device.of('msg')).toEqual([{ t: 'msg', seq: 1, from: 'kid', text: '三点半 放学', at: 1_000_000, session: null }])
     await core.onDeviceMessage(device, JSON.stringify({ t: 'history', limit: 10 }))
     expect(device.of('history')[0]).toMatchObject({ more: false, items: [{ seq: 1, from: 'kid', text: '三点半 放学' }] })
   })
 
   it('replays missed messages after hello with lastSeq', async () => {
     const { core, device } = setup()
-    for (const id of ['E1', 'E2', 'E3']) await core.onKidMessage({ eventId: id, channel: 'D0123ABCDEF', user: 'U', text: id, ts: id, threadTs: null })
+    for (const id of ['E1', 'E2', 'E3']) await core.onKidMessage({ eventId: id, channel: 'D0123ABCDEF', user: 'U', text: id, ts: id, threadTs: null, botId: null, kind: 'message' as const })
     await core.onDeviceMessage(device, JSON.stringify({ t: 'hello', lastSeq: 1 }))
     expect(device.of('hello')[0]).toMatchObject({ lastSeq: 3, fastLane: false })
     expect(device.of('msg').slice(-2).map(m => m.text)).toEqual(['E2', 'E3'])
@@ -193,7 +194,7 @@ describe('HubCore review fixes', () => {
   it('F1: an unauthenticated socket gets nothing until it sends the token in the first frame', async () => {
     const stranger = new FakeDevice(false)
     const { c } = core({}, [stranger])
-    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'secret news', ts: '1', threadTs: null })
+    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'secret news', ts: '1', threadTs: null, botId: null, kind: 'message' as const })
     expect(stranger.sent).toEqual([])
     await c.onDeviceMessage(stranger, JSON.stringify({ t: 'history' }))
     expect(stranger.closed).toEqual({ code: 4401, reason: 'unauthorized' })
@@ -250,7 +251,7 @@ describe('HubCore review fixes', () => {
     const { c, posts, advance } = core({}, [new FakeDevice()])
     await c.sayFromGlasses('one')
     advance(SESSION_IDLE_MS + 1)
-    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'late', ts: '2', threadTs: '9.0' })
+    await c.onKidMessage({ eventId: 'E1', channel: 'D0123ABCDEF', user: 'U', text: 'late', ts: '2', threadTs: '9.0', botId: null, kind: 'message' as const })
     await c.sayFromGlasses('two')
     expect(posts.map(p => p.threadTs)).toEqual([null, null])
   })
@@ -258,7 +259,7 @@ describe('HubCore review fixes', () => {
   it('F4: hello replays every retained message after lastSeq, beyond one page', async () => {
     const d = new FakeDevice()
     const { c } = core({}, [])
-    for (let i = 1; i <= 120; i++) await c.onKidMessage({ eventId: `E${i}`, channel: 'D0123ABCDEF', user: 'U', text: `m${i}`, ts: `${i}`, threadTs: null })
+    for (let i = 1; i <= 120; i++) await c.onKidMessage({ eventId: `E${i}`, channel: 'D0123ABCDEF', user: 'U', text: `m${i}`, ts: `${i}`, threadTs: null, botId: null, kind: 'message' as const })
     await c.onDeviceMessage(d, JSON.stringify({ t: 'hello', lastSeq: 0 }))
     const seqs = d.of('msg').map(m => m.seq)
     expect(seqs).toHaveLength(120)
@@ -329,7 +330,7 @@ describe('HubCore review round 2', () => {
     })
     return { c, storage, device, posts }
   }
-  const kid = (eventId: string, user = 'UKID0001', text = 'hi') => ({ eventId, channel: 'D0123ABCDEF', user, text, ts: '1', threadTs: null })
+  const kid = (eventId: string, user = 'UKID0001', text = 'hi') => ({ eventId, channel: 'D0123ABCDEF', user, text, ts: '1', threadTs: null, botId: null, kind: 'message' as const })
 
   it('F2: history and the seen marker are written together, so a retry after a failed write stores the reply once', async () => {
     const { c, storage } = core2()
@@ -357,11 +358,12 @@ describe('HubCore review round 2', () => {
     await posting
   })
 
-  it("F7: Fox's own message is dropped by the token's own user id, whatever the authorizations say", async () => {
+  it("F7: Fox's own message is dropped by the token's own user id, and the 〔眼镜〕 prefix is never shown as Kid", async () => {
     const { c, device } = core2()
     expect(await c.onKidMessage(kid('E3', 'UFOX0001', '〔眼镜〕echo'))).toBeNull()
-    expect(await c.onKidMessage(kid('E4', 'UKID0001', '〔眼镜〕kid text'))).not.toBeNull()
-    expect(device.of('msg').map(m => m.text)).toEqual(['〔眼镜〕kid text'])
+    expect(await c.onKidMessage(kid('E4', 'UKID0001', 'kid text'))).not.toBeNull()
+    expect(await c.onKidMessage(kid('E5', 'UKID0001', '〔眼镜〕echo seen as kid'))).toBeNull()
+    expect(device.of('msg').map(m => m.text)).toEqual(['kid text'])
   })
 
   it('F5: a close other than 1000 after audio.stop is reported and not posted', async () => {
@@ -392,5 +394,105 @@ describe('HubCore review round 2', () => {
     first.close(1000)
     await c.turnsSettled
     expect(posts).toEqual(['〔眼镜〕第一句', '〔眼镜〕第二句'])
+  })
+})
+
+describe('HubCore bot-DM model', () => {
+  function core3() {
+    let now = 1_000_000
+    let n = 0
+    const device = new FakeDevice()
+    const selfUserId = vi.fn(async () => 'UFOX0001')
+    const c = new HubCore({
+      storage: new FakeStorage(),
+      sockets: () => [device],
+      slack: {
+        selfUserId,
+        postToKid: async () => ({ ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }),
+      },
+      asr: null,
+      fastLane: DISABLED_FAST_LANE,
+      now: () => now,
+    })
+    return { c, device, selfUserId, advance: (ms: number) => (now += ms) }
+  }
+  const kidMsg = (over: Partial<KidMessage>): KidMessage => ({
+    eventId: `E${Math.random()}`,
+    channel: 'D0123ABCDEF',
+    user: null,
+    botId: 'B0KIDBOT01',
+    text: 'reply',
+    ts: '1700000001.000000',
+    threadTs: null,
+    kind: 'message',
+    ...over,
+  })
+
+  it('matches an in-thread Kid reply to the session that opened the thread, even after a new session started', async () => {
+    const { c, device, advance } = core3()
+    await c.sayFromGlasses('first session question')
+    const firstSession = device.of('posted').length ? (await c.history.page(null, 1)).items[0].session : null
+    advance(SESSION_IDLE_MS + 1)
+    await c.sayFromGlasses('second session question')
+    const secondSession = (await c.history.page(null, 1)).items[0].session
+    expect(firstSession).not.toBe(secondSession)
+    await c.onKidMessage(kidMsg({ text: 'answer to first', threadTs: '1700000000.000' }))
+    await c.onKidMessage(kidMsg({ text: 'answer to second', threadTs: '1700000000.001' }))
+    const msgs = device.of('msg')
+    expect(msgs.map(m => [m.text, m.session])).toEqual([
+      ['answer to first', firstSession],
+      ['answer to second', secondSession],
+    ])
+  })
+
+  it('assigns a top-level Kid reply to the active session, or to none once it has expired', async () => {
+    const { c, device, advance } = core3()
+    await c.sayFromGlasses('q')
+    const active = (await c.history.page(null, 1)).items[0].session
+    await c.onKidMessage(kidMsg({ text: 'top-level now' }))
+    advance(SESSION_IDLE_MS + 1)
+    await c.onKidMessage(kidMsg({ text: 'top-level later' }))
+    expect(device.of('msg').map(m => [m.text, m.session])).toEqual([
+      ['top-level now', active],
+      ['top-level later', null],
+    ])
+  })
+
+  it('marks an edited Kid reply and appends it rather than rewriting history', async () => {
+    const { c, device } = core3()
+    await c.onKidMessage(kidMsg({ eventId: 'E1', text: '三点放学' }))
+    await c.onKidMessage(kidMsg({ eventId: 'E2', text: '三点半放学', kind: 'edit' }))
+    expect(device.of('msg').map(m => [m.text, m.edited ?? false])).toEqual([
+      ['三点放学', false],
+      ['（已修改）三点半放学', true],
+    ])
+  })
+
+  it('does not call auth.test for bot messages without a user, and drops Fox by the resolved id', async () => {
+    const { c, device, selfUserId } = core3()
+    await c.onKidMessage(kidMsg({ eventId: 'E1', user: null }))
+    expect(selfUserId).not.toHaveBeenCalled()
+    await c.onKidMessage(kidMsg({ eventId: 'E2', user: 'UFOX0001', botId: null, text: 'typed by Fox' }))
+    expect(selfUserId).toHaveBeenCalledOnce()
+    expect(device.of('msg').map(m => m.text)).toEqual(['reply'])
+  })
+})
+
+describe('HubCore kid sender logging', () => {
+  it('logs each new Kid sender id pair once, without message text', async () => {
+    const logs: string[] = []
+    const c = new HubCore({
+      storage: new FakeStorage(),
+      sockets: () => [],
+      slack: { selfUserId: async () => 'UFOX0001', postToKid: async () => ({ ts: '1', channel: 'D0123ABCDEF' }) },
+      asr: null,
+      fastLane: DISABLED_FAST_LANE,
+      now: () => 1,
+      log: m => logs.push(m),
+    })
+    const m = (eventId: string, text: string) => ({ eventId, channel: 'D0123ABCDEF', user: 'U0KIDBOT01', botId: 'B0KIDBOT01', text, ts: '1', threadTs: null, kind: 'message' as const })
+    await c.onKidMessage(m('E1', 'secret homework answer'))
+    await c.onKidMessage(m('E2', 'second'))
+    expect(logs).toEqual(['kid sender user=U0KIDBOT01 bot=B0KIDBOT01'])
   })
 })

@@ -3,7 +3,7 @@ import { checkDeviceToken, isAuthedAttachment, type SocketAttachment } from './d
 import type { FastLane } from './fast-lane'
 import { HistoryStore, PAGE_MAX, type HistoryItem, type KvStorage } from './history'
 import { parseClientMessage, type ServerMessage } from './protocol'
-import { cleanText, fromSlack, toSlack } from './sanitize'
+import { cleanText, fromSlack, isFromGlasses, toSlack } from './sanitize'
 import type { KidMessage } from './slack-events'
 import type { PostResult } from './slack-client'
 
@@ -40,6 +40,8 @@ export interface Session {
 
 export const SESSION_KEY = 'meta:session'
 export const SEEN_KEY = 'meta:seen'
+export const THREAD_PREFIX = 'thread:'
+export const EDITED_MARK = '（已修改）'
 export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SEEN_CAP = 200
 export const PENDING_AUDIO_CAP = 100
@@ -67,6 +69,7 @@ export class HubCore {
   readonly history: HistoryStore
   private turn: AsrTurn | null = null
   private queue: Promise<unknown> = Promise.resolve()
+  private readonly kidSendersLogged = new Set<string>()
   private turnChain: Promise<unknown> = Promise.resolve()
 
   constructor(private readonly deps: HubDeps) {
@@ -96,7 +99,16 @@ export class HubCore {
   }
 
   private toWire(i: HistoryItem) {
-    return { seq: i.seq, from: i.from, text: i.text, at: i.at }
+    return { seq: i.seq, from: i.from, text: i.text, at: i.at, session: i.session ?? null, ...(i.edited ? { edited: true } : {}) }
+  }
+
+  private async sessionForThread(threadTs: string | null): Promise<string | null> {
+    if (threadTs) {
+      const id = await this.deps.storage.get<string>(THREAD_PREFIX + threadTs)
+      if (id) return id
+    }
+    const s = await this.deps.storage.get<Session>(SESSION_KEY)
+    return this.isLive(s, this.deps.now()) ? s.id : null
   }
 
   private isLive(s: Session | undefined, now: number): s is Session {
@@ -212,19 +224,22 @@ export class HubCore {
       return null
     }
     const next: Session = { ...session, threadTs: session.threadTs ?? posted.ts, lastAt: this.deps.now() }
-    await this.deps.storage.put(SESSION_KEY, next)
+    const sessionWrites: Record<string, unknown> = { [SESSION_KEY]: next }
+    if (!session.threadTs && next.threadTs) sessionWrites[THREAD_PREFIX + next.threadTs] = next.id
+    await this.deps.storage.putAll(sessionWrites)
     const item = await this.history.append({
       from: 'glasses',
       text: cleanText(raw),
       slackTs: posted.ts,
       threadTs: next.threadTs,
+      session: next.id,
       at: this.deps.now(),
     })
     this.broadcast({ t: 'posted', seq: item.seq, text: item.text })
     if (this.deps.fastLane.enabled) {
       const answer = await this.deps.fastLane.answer(item.text)
       if (answer) {
-        const fast = await this.history.append({ from: 'fast', text: cleanText(answer), slackTs: null, threadTs: next.threadTs, at: this.deps.now() })
+        const fast = await this.history.append({ from: 'fast', text: cleanText(answer), slackTs: null, threadTs: next.threadTs, session: next.id, at: this.deps.now() })
         this.broadcast({ t: 'msg', ...this.toWire(fast) })
       }
     }
@@ -236,12 +251,22 @@ export class HubCore {
     if (seen.includes(msg.eventId)) return null
     const nextSeen = [...seen, msg.eventId].slice(-SEEN_CAP)
     const self = msg.user ? await this.deps.slack.selfUserId() : null
-    const text = fromSlack(msg.text)
-    if ((self && msg.user === self) || !text) {
+    const body = fromSlack(msg.text)
+    if ((self && msg.user === self) || isFromGlasses(msg.text.trimStart()) || !body) {
       await this.deps.storage.put(SEEN_KEY, nextSeen)
       return null
     }
-    const item = await this.history.append({ from: 'kid', text, slackTs: msg.ts, threadTs: msg.threadTs, at: this.deps.now() }, { [SEEN_KEY]: nextSeen })
+    const sender = `user=${msg.user ?? '-'} bot=${msg.botId ?? '-'}`
+    if (!this.kidSendersLogged.has(sender)) {
+      this.kidSendersLogged.add(sender)
+      this.log(`kid sender ${sender}`)
+    }
+    const edited = msg.kind === 'edit'
+    const session = await this.sessionForThread(msg.threadTs)
+    const item = await this.history.append(
+      { from: 'kid', text: edited ? EDITED_MARK + body : body, slackTs: msg.ts, threadTs: msg.threadTs, session, ...(edited ? { edited: true } : {}), at: this.deps.now() },
+      { [SEEN_KEY]: nextSeen },
+    )
     this.broadcast({ t: 'msg', ...this.toWire(item) })
     void this.enqueue(async () => {
       const now = this.deps.now()

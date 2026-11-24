@@ -16,11 +16,11 @@ export type ServerMessage =
   | { t: 'auth.ok' }
   | { t: 'hello'; session: string; lastSeq: number; fastLane: boolean }
   | { t: 'pong' }
-  | { t: 'msg'; seq: number; from: Speaker; text: string; at: number }
+  | { t: 'msg'; seq: number; from: Speaker; text: string; at: number; session: string | null; edited?: boolean }
   | { t: 'asr.partial'; text: string }
   | { t: 'asr.final'; text: string }
   | { t: 'posted'; seq: number; text: string }
-  | { t: 'history'; items: Array<{ seq: number; from: Speaker; text: string; at: number }>; more: boolean }
+  | { t: 'history'; items: Array<{ seq: number; from: Speaker; text: string; at: number; session: string | null; edited?: boolean }>; more: boolean }
   | { t: 'error'; code: string; message: string }
 
 export type Parsed = { ok: true; msg: ClientMessage } | { ok: false; error: string }

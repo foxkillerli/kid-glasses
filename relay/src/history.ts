@@ -14,6 +14,8 @@ export interface HistoryItem {
   text: string
   slackTs: string | null
   threadTs: string | null
+  session?: string | null
+  edited?: boolean
   at: number
 }
 

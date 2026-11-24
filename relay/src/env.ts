@@ -9,6 +9,8 @@ export interface Env {
   DEEPGRAM_MODEL?: string
   DEEPGRAM_LANGUAGE?: string
   FAST_LANE_ENABLED?: string
+  KID_BOT_ID?: string
+  KID_BOT_USER_ID?: string
 }
 
 export interface ConfigStatus {
@@ -18,6 +20,7 @@ export interface ConfigStatus {
   deepgram: boolean
   deviceToken: boolean
   fastLane: boolean
+  kidAllowlist: boolean
 }
 
 export function configStatus(env: Env): ConfigStatus {
@@ -28,5 +31,6 @@ export function configStatus(env: Env): ConfigStatus {
     deepgram: !!env.DEEPGRAM_API_KEY,
     deviceToken: (env.DEVICE_TOKEN?.length ?? 0) >= 32,
     fastLane: env.FAST_LANE_ENABLED === 'true' && !!env.FAST_LLM_KEY,
+    kidAllowlist: !!(env.KID_BOT_ID || env.KID_BOT_USER_ID),
   }
 }
