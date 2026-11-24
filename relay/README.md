@@ -63,7 +63,36 @@ On a redeploy:
 - **Fox:** the relay posts **as Fox** with his user token (`xoxp-`) into the DM between Fox and the **Kid bot**. Fox's user id (`U0000000000`) is not hardcoded; the relay resolves it lazily with `auth.test` and caches it.
 - **Kid:** replies as a bot in that DM, in-thread or top-level.
 - **Events:** the relay receives `message.im` as user events, which means for all of Fox's DMs. It considers only `KID_DM_CHANNEL_ID`.
-- **Waking Kid:** `chat.postMessage` with a user token into a bot DM needs no `as_user`. Whether such a post wakes Kid depends on how Kid's bot subscribes to events. That is outside the relay and will be checked end to end.
+- **Waking Kid:** the 2026-11-25 e2e showed that a user-token post does **not** wake Kid. Kid's Slack integration drops messages that carry `app_id` / `bot_profile` at the platform level. The relay therefore also calls Kid's webhook (next section).
+
+## Outbound: Slack post + Kid webhook
+
+For every glasses message, inside the post queue:
+
+1. Post `〔眼镜〕…` into the Kid DM with the user token, exactly as before. This is the record and the thread root.
+2. If `KID_WEBHOOK_URL` and `KID_WEBHOOK_SECRET` are both set, POST to Kid's webhook. If they are not set, the relay keeps post-only behaviour and reports the webhook as `skipped`.
+3. Kid replies **as the Kid bot** in the same thread, or top-level. The existing `message.im` path pushes the reply to the glasses.
+
+Webhook request:
+
+```
+POST <KID_WEBHOOK_URL>
+Content-Type: application/json
+X-Kid-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(key, t + "." + rawBody)>
+
+{"v":1,"source":"kid-glasses","session":"<relay session id>","channel":"<KID_DM_CHANNEL_ID>","thread_ts":"<thread root ts>","message_ts":"<ts of this 〔眼镜〕 message>","text":"<transcript without the 〔眼镜〕 prefix>","at":<unix ms>}
+```
+
+- **Key:** the `KID_WEBHOOK_SECRET` string as UTF-8 bytes. A 64-hex-char secret is used as-is, not hex-decoded.
+- **What is signed:** exactly the body bytes that are sent.
+- **Text:** cleaned and clipped to 1500 characters. It is not HTML-escaped, unlike the Slack text.
+- **`thread_ts` / `message_ts`:** within one session `thread_ts` stays the same and `message_ts` is new each time. On the first message both equal the root post's ts.
+- **Timeout and retry:** 10 s per attempt. One retry, after 0.5 s, on 5xx or a network error or timeout. 4xx is never retried.
+- **Failure:** it never undoes or blocks the Slack post or history.
+  - The device gets `{"t":"kid-webhook","result":"failed","status":N|null}` plus `error kid-webhook-failed` with the message `kid webhook failed (<status|network>)`.
+  - The log records only the status and the attempt count.
+- **URL and secret** are never logged or sent to the device.
+- **`/health`** reports `kidWebhook: true` only when both values are set and the URL is `https://`.
 
 ## Inbound rules
 
@@ -103,6 +132,8 @@ Fox enters every secret himself, in the Cloudflare dashboard or with `wrangler s
 | `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | var | Default `nova-3` / `multi`. If Mandarin accuracy is poor, try `language=zh-CN`. |
 | `FAST_LANE_ENABLED` | var | `"false"` |
 | `KID_BOT_ID` / `KID_BOT_USER_ID` | var, optional | Pin the Kid bot identity (see "Inbound rules") |
+| `KID_WEBHOOK_URL` | secret, optional | Kid's webhook routine (`https://…`) |
+| `KID_WEBHOOK_SECRET` | secret, optional | HMAC key for `X-Kid-Signature` |
 
 `GET /health` reports which settings are present, as booleans only. Values are never echoed.
 
@@ -135,7 +166,7 @@ Each route fails closed when its secret is missing:
 | `{"t":"audio.stop"}` | End the turn. Deepgram's final transcript is posted to Kid. If the stream fails or closes before the stop, the relay sends `error asr-interrupted` and posts nothing |
 | `{"t":"history","before":seq,"limit":n}` | Fetch older messages |
 | `{"t":"session.new"}` | Start a new Slack thread |
-| `{"t":"ping"}` | Keep-alive |
+| `{"t":"ping"}` | Keep-alive. **Clients must send it about every 25 s.** In the 2026-11-25 e2e, a socket with no traffic was dropped (1006) after 270 s, and Cloudflare recorded it as a client-side disconnect |
 
 **Relay → client**
 
@@ -146,6 +177,7 @@ Each route fails closed when its secret is missing:
 | `msg` | A message: `from` = `kid` / `glasses` / `fast`, plus `session`, and `edited` on edits |
 | `asr.partial` / `asr.final` | Live and final transcript |
 | `posted` | The message reached Slack |
+| `kid-webhook` | `seq`, `result` = `ok` / `skipped` / `failed`, and `status`. Sent after each `posted` |
 | `history` | A page of older messages |
 | `error` | `code` and `message` |
 | `pong` | Reply to `ping` |
