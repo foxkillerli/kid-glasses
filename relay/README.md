@@ -7,6 +7,8 @@ This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 pl
 
 **Status (2026-11-25): deployed and configured.** Seven secrets are set by Fox: `SLACK_USER_TOKEN`, `SLACK_SIGNING_SECRET`, `KID_DM_CHANNEL_ID`, `DEEPGRAM_API_KEY`, `DEVICE_TOKEN`, `KID_WEBHOOK_URL`, `KID_WEBHOOK_SECRET`. Workers Logs are on (`observability.enabled`, `head_sampling_rate 1`). Devices pair through Fox's Slack DM (see "Device pairing").
 
+**Slack bot (2026-11-25): KK.** The Kid side of Slack is now the bot KK. `KID_DM_CHANNEL_ID`, `KID_WEBHOOK_URL` and `KID_WEBHOOK_SECRET` point to Fox's DM with KK and KK's webhook (entered by Fox in the Cloudflare dashboard, never in this repo). KK's identity is pinned with the plain vars `KID_BOT_ID` and `KID_BOT_USER_ID` in `wrangler.jsonc`, so `/health` shows `kidAllowlist: true` and only KK's messages reach the glasses. The env names keep the `KID_` prefix; the glasses UI still says Kid.
+
 - URL: <https://kid-glasses-relay.your-subdomain.workers.dev>
 - Slack Events request URL: `https://kid-glasses-relay.your-subdomain.workers.dev/slack/events`
 - Worker: `kid-glasses-relay`, Workers Free plan, workers.dev only.
@@ -135,7 +137,7 @@ Fox enters every secret himself, in the Cloudflare dashboard or with `wrangler s
 | `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | var | Default `nova-3` / `multi`. `DEEPGRAM_LANGUAGE` is used for the plugin's `自动` setting; `中文` always uses `zh-CN` and `English` uses `en`. |
 | `DEEPGRAM_LANGUAGE_HINTS` | var | Default `zh,en`. Sent as `language_hint` only with `multi`. Invalid codes are dropped; if Deepgram still rejects the URL with HTTP 400, the turn falls back to `nova-3` + `multi` without hints. |
 | `FAST_LANE_ENABLED` | var | `"false"` |
-| `KID_BOT_ID` / `KID_BOT_USER_ID` | var, optional | Pin the Kid bot identity (see "Inbound rules") |
+| `KID_BOT_ID` / `KID_BOT_USER_ID` | var, optional | Pin the Kid bot identity (see "Inbound rules"). Both are set for KK in `wrangler.jsonc` |
 | `KID_WEBHOOK_URL` | secret, optional | Kid's webhook routine (`https://…`) |
 | `KID_WEBHOOK_SECRET` | secret, optional | HMAC key for `X-Kid-Signature` |
 

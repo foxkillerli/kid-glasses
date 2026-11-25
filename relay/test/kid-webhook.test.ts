@@ -92,6 +92,11 @@ describe('kidWebhook health flag', () => {
   const base = { HUB: {} } as unknown as Env
   it('is true only when both URL (https) and secret are set', () => {
     expect(configStatus(base).kidWebhook).toBe(false)
+    expect(configStatus(base).kidAllowlist).toBe(false)
+    expect(configStatus({ ...base, KID_BOT_ID: '', KID_BOT_USER_ID: '' }).kidAllowlist).toBe(false)
+    expect(configStatus({ ...base, KID_BOT_ID: 'B0KIDBOT01' }).kidAllowlist).toBe(true)
+    expect(configStatus({ ...base, KID_BOT_USER_ID: 'U0KIDBOT01' }).kidAllowlist).toBe(true)
+    expect(configStatus({ ...base, KID_BOT_ID: 'B0KIDBOT01', KID_BOT_USER_ID: 'U0KIDBOT01' }).kidAllowlist).toBe(true)
     expect(configStatus({ ...base, KID_WEBHOOK_URL: URL_ }).kidWebhook).toBe(false)
     expect(configStatus({ ...base, KID_WEBHOOK_SECRET: KEY }).kidWebhook).toBe(false)
     expect(configStatus({ ...base, KID_WEBHOOK_URL: 'http://plain.test', KID_WEBHOOK_SECRET: KEY }).kidWebhook).toBe(false)

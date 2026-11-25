@@ -103,6 +103,17 @@ describe('routeSlackEvent: bot-DM model', () => {
     expect(routeSlackEvent(env({ user: KID_BOT_USER, text: 'x', ts: '1' }), KID, { userId: KID_BOT_USER }).kind).toBe('kid-message')
   })
 
+  it('with both pins set (as deployed for KK), accepts the pinned bot id or bot user, and rejects any other bot or person', () => {
+    const both = { botId: KID_BOT, userId: KID_BOT_USER }
+    expect(routeSlackEvent(env(kidBot), KID, both)).toMatchObject({ kind: 'kid-message', message: { verifiedKid: true } })
+    expect(routeSlackEvent(env({ ...kidBot, user: KID_BOT_USER }), KID, both)).toMatchObject({ kind: 'kid-message', message: { verifiedKid: true } })
+    expect(routeSlackEvent(env({ user: KID_BOT_USER, text: 'x', ts: '1' }), KID, both)).toMatchObject({ kind: 'kid-message', message: { verifiedKid: true } })
+    expect(routeSlackEvent(env({ ...kidBot, bot_id: 'B0OLDBOT001' }), KID, both)).toEqual({ kind: 'ignore', reason: 'not-kid' })
+    expect(routeSlackEvent(env({ ...kidBot, bot_id: 'B0OLDBOT001', user: 'U0OLDBOT001' }), KID, both)).toEqual({ kind: 'ignore', reason: 'not-kid' })
+    expect(routeSlackEvent(env({ user: 'USOMEONE01', text: 'x', ts: '1' }), KID, both)).toEqual({ kind: 'ignore', reason: 'not-kid' })
+    expect(routeSlackEvent(env({ user: FOX, text: 'x', ts: '1' }), KID, both)).toEqual({ kind: 'ignore', reason: 'own-message' })
+  })
+
   it('F1: with a pinned Kid identity, a verified Kid reply starting with 〔眼镜〕 is still forwarded', () => {
     const r = routeSlackEvent(env({ ...kidBot, text: '〔眼镜〕我刚收到这条' }), KID, { botId: KID_BOT })
     expect(r).toMatchObject({ kind: 'kid-message', message: { verifiedKid: true, text: '〔眼镜〕我刚收到这条' } })
