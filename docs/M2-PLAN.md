@@ -83,5 +83,12 @@ Plugin (`src/app.ts`, `src/lib/relay-client.ts`):
   - M2-3: a hung Deepgram upgrade is aborted on timeout or cancel, and `start()` no longer waits for it.
   - M2-4: a close before `CloseStream` is retried; an interim is posted only at the 5 s deadline.
   - M2-5: `asr.partial` / `asr.final` carry the turn `cid`, and the plugin ignores another turn's transcript.
+- Round 2 (change `m2-deepgram-fixnext`): PASS, 0 BLOCK, 5 FIX_NEXT, all fixed before deploy:
+  - the retry buffer keeps the unfinalized tail of a partly finalized frame;
+  - a stopped turn posts only confirmed (`is_final`) text, except at the 5 s deadline;
+  - a 1000 close after `Finalize` with every byte finalized posts, instead of retrying;
+  - the plugin only shows transcripts whose `cid` is the live turn;
+  - a late mic-open result cannot cancel a newer turn.
+  - A third review round was not run.
 - Left for later (from M1): M2-6, a Slack post that never returns blocks later voice turns. `chat.postMessage` has no deadline.
 

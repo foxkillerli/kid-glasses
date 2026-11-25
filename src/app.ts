@@ -326,7 +326,7 @@ export class App {
           this.showFlash(ERROR_TEXT[code] ?? `出错了：${code}`)
         },
         asr: (kind, text, cid) => {
-          if (cid && cid !== this.liveCid) return
+          if (cid !== this.liveCid) return
           this.voice.partial = text
           if (kind === 'final' && !text) this.voice.partial = ''
           if (this.liveCid) {
@@ -996,7 +996,7 @@ export class App {
       r = `throw ${String(err).slice(0, 40)}`
     }
     this.note(`voice start ${mode} src=glasses audioControl -> ${String(r)}`)
-    if (r !== true) {
+    if (r !== true && v.active && v.cid === cid) {
       await this.stopVoice('mic-failed', false)
       this.showFlash('眼镜麦克风没打开')
     }
