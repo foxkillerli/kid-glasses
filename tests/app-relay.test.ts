@@ -308,7 +308,7 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     expect(a.hintText()).toContain('转写超时')
   })
 
-  it('M3-5: 新对话 sends session.new from the menu; the hint says when newer content is below; a scheduled resend shows 重发; the phone-page log holds no transcript, token or pairing code', async () => {
+  it('M3-5: 新对话 sends session.new from the menu; the hint says when newer content is below; a scheduled resend shows 重发; the phone-page log holds no transcript, Kid text, token or cid', async () => {
     const { App } = await import('../src/app')
     const bridge = {
       audioControl: vi.fn(async () => true),

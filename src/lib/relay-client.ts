@@ -67,6 +67,7 @@ const CONNECTING = 0
 export const CLOSE_UNAUTHORIZED = 4401
 const PENDING_CID_RE = /^[A-Za-z0-9_-]{8,64}$/
 const MAX_PENDING_CHARS = 2000
+const FLUSH_FALLBACK_MS = 5_000
 
 export function backoffDelay(attempt: number, random: number, baseMs: number = RELAY_TIMING.backoffBaseMs, maxMs: number = RELAY_TIMING.backoffMaxMs): number {
   const cap = Math.min(maxMs, baseMs * 2 ** Math.min(attempt, 16))
@@ -88,6 +89,7 @@ export class RelayClient {
   private outbox: OutboxEntry[] = []
   private attempt = 0
   private reconnectTimer: unknown = null
+  private flushTimer: unknown = null
   private pingTimer: unknown = null
   private connectTimer: unknown = null
   private probeTimer: unknown = null
@@ -217,7 +219,9 @@ export class RelayClient {
       [this.reconnectTimer, 'clearTimeout'],
       [this.connectTimer, 'clearTimeout'],
       [this.probeTimer, 'clearTimeout'],
+      [this.flushTimer, 'clearTimeout'],
     ] as const) if (timer !== null) this.deps.timers[clear](timer)
+    this.flushTimer = null
     if (this.pingTimer !== null) this.deps.timers.clearInterval(this.pingTimer)
     for (const t of this.retryTimers.values()) this.deps.timers.clearTimeout(t)
     this.retryTimers.clear()
@@ -349,7 +353,11 @@ export class RelayClient {
         if (this.wantHistory) this.sendJson({ t: 'history', limit: 20 })
         this.startPing()
         this.setState('online')
-        this.flushOutbox()
+        if (this.flushTimer !== null) this.deps.timers.clearTimeout(this.flushTimer)
+        this.flushTimer = this.deps.timers.setTimeout(() => {
+          this.flushTimer = null
+          this.flushOutbox()
+        }, FLUSH_FALLBACK_MS)
         return
       case 'msg':
         this.acceptItems([m as unknown as RelayItem], this.stateValue === 'online' ? 'live' : 'replay')
@@ -357,6 +365,11 @@ export class RelayClient {
       case 'replay.done':
         this.catchingUp = false
         this.bumpSeq(Math.max(Number(m.upTo) || 0, this.catchUpMax))
+        if (this.flushTimer !== null) {
+          this.deps.timers.clearTimeout(this.flushTimer)
+          this.flushTimer = null
+          this.flushOutbox()
+        }
         return
       case 'history':
         this.wantHistory = false
@@ -469,7 +482,7 @@ export class RelayClient {
       this.log('relay outbox full; pending voice turn not kept')
       return
     }
-    this.outbox = [...this.outbox, { cid, text: clean, at: this.deps.now(), tries: 0 }]
+    this.outbox = [...this.outbox, { cid, text: clean, at: this.deps.now(), tries: 1 }]
     this.log('relay pending voice turn kept for resend')
     void this.persistOutbox()
     this.scheduleResend(cid, 1)
@@ -531,7 +544,7 @@ export class RelayClient {
     this.sendJson({ t: 'audio.cancel' })
   }
 
-  newSession(): void {
-    this.sendJson({ t: 'session.new' })
+  newSession(): boolean {
+    return this.sendJson({ t: 'session.new' })
   }
 }

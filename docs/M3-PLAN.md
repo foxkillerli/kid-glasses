@@ -53,3 +53,23 @@ Written 2026-11-25 on branch `m3`, cut from `main` at `d893b39`, which is what M
 ## Deploy later (after user's M2 test)
 
 Same recipe as M2: the relay with `keep_bindings: ["secret_text"]` and no migration, then the plugin to `kid-glasses-m0`. Deploy the relay first: the new plugin also works with the M2 relay, just without `turn.pending`.
+
+## Review
+
+- **Round 1** (codex gpt-6.2-sol, critical-review, change `m3-polish`): FAIL, 1 BLOCK, 5 FIX_NEXT, 1 NOTE.
+- **BLOCK M3-01**: one voice cid could produce two Slack posts. Fixed:
+  - Slack errors that can follow a write (`internal_error`, `fatal_error`, `request_timeout`, `service_unavailable`, `http_5xx`) count as uncertain, so the resend reconciles first.
+  - A resend of an uncertain cid that reconciles to nothing within 30 s of the failure posts nothing (`slack-unreachable`, retried later), so a late-landing first write is found next time.
+  - Reconcile refuses to guess when Slack says `has_more` without a cursor.
+  - Reconcile compares text with Slack's link formatting (`<url|label>`, `<mailto:…>`) removed.
+  - The plugin flushes its outbox after `replay.done`, not at `auth.ok`, so a post it missed the ack for is acked by the replay first (5 s fallback if no `replay.done` arrives).
+  - **Residual, documented:** a duplicate is still possible when all of these hold: the phone holds a `say` that did reach Slack but whose ack it missed, the relay then takes more than 1000 newer posts (the cid record cap) and 500 (history), and the phone reconnects within its 12 h outbox window. Closing that needs per-cid storage keys and is left for a later change.
+- **FIX_NEXT fixed:**
+  - M3-02: the pending text fits the device's UTF-16 limit, and a permanent refusal on a resend clears the pending entry.
+  - M3-03: reconcile excludes every glasses post in recent history (four pages of 50), including ones sent without a cid.
+  - M3-04: a pending voice resend goes to the session and thread of its first attempt.
+  - M3-05: an adopted transcript shows `重发` at once, and `新对话` only confirms if `session.new` was actually sent.
+  - M3-06: an auth timeout closes with 4408 instead of 4401, so no plugin forgets its token because of a slow first frame.
+- **Left as is:** Slack `Retry-After` is not passed to the plugin's resend schedule; the plugin retries at 10 s / 30 s / 90 s regardless.
+- **NOTE M3-07:** the phone-log test no longer claims to cover pairing codes (the relay pairing log guard covers them).
+

@@ -998,7 +998,10 @@ export class App {
       this.showFlash(`现在${STATE_TEXT[this.relay.state]}，等连上再开新对话`)
       return
     }
-    this.relay.newSession()
+    if (!this.relay.newSession()) {
+      this.showFlash('没发出去，等连上再开新对话')
+      return
+    }
     this.note('session.new sent')
     this.showFlash('已开始新对话（Slack 新话题）')
   }
