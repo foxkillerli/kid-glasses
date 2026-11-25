@@ -195,4 +195,57 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     expect(ws.json().filter(m => m.t === 'audio.stop')).toHaveLength(1)
     expect(a.hintText()).toContain('… 正在转写')
   })
+
+  it('review M2-2/M2-5: audio.stop is sent even if the mic close never answers, and transcripts of another turn are ignored', async () => {
+    const { App } = await import('../src/app')
+    const bridge = {
+      audioControl: vi.fn(async (open: boolean) => (open ? true : new Promise(() => {}))),
+      createStartUpPageContainer: vi.fn(async () => 0),
+      rebuildPageContainer: vi.fn(async () => true),
+      textContainerUpgrade: vi.fn(async () => true),
+      shutDownPageContainer: vi.fn(async () => true),
+      onEvenHubEvent: vi.fn(),
+      onLaunchSource: vi.fn(),
+      onDeviceStatusChanged: vi.fn(),
+      getDeviceInfo: vi.fn(async () => null),
+    } as unknown as EvenAppBridge
+    const store = new MemoryStore()
+    store.map.set(STORE_KEYS.token, 'kgd_saved')
+    const sockets: FakeWs[] = []
+    const app = new App(bridge, { render() {} }, null, {
+      store,
+      fetch: vi.fn(async () => Response.json({})),
+      ws: (url, protocols) => {
+        const ws = new FakeWs(url, protocols)
+        sockets.push(ws)
+        return ws
+      },
+      voiceTailMs: 0,
+      micCloseWaitMs: 20,
+    })
+    const a = app as unknown as { bodyText(): string; onEvent(e: unknown): void }
+    await app.start()
+    await settle()
+    const ws = sockets[0]
+    ws.open()
+    ws.frame({ t: 'auth.ok' })
+    a.onEvent({ sysEvent: { eventType: 9 } })
+    await settle()
+    const start = ws.json().find(m => m.t === 'audio.start')
+    ws.frame({ t: 'asr.partial', text: '这是我的', cid: start?.cid })
+    ws.frame({ t: 'asr.partial', text: '别的回合', cid: 'other-turn-123' })
+    await settle()
+    expect(a.bodyText()).toContain('你说：这是我的')
+    expect(a.bodyText()).not.toContain('别的回合')
+    a.onEvent(evenHubEventFromJson({ type: 'audioEvent', jsonData: { audioPcm: [1, 0] } }))
+    a.onEvent({ sysEvent: { eventType: 10 } })
+    await settle()
+    expect(ws.json().some(m => m.t === 'audio.stop')).toBe(false)
+    await new Promise(r => setTimeout(r, 40))
+    await settle()
+    expect(ws.json().filter(m => m.t === 'audio.stop')).toHaveLength(1)
+    ws.frame({ t: 'asr.final', text: '', cid: 'other-turn-123' })
+    await settle()
+    expect(a.bodyText()).toContain('你说：这是我的')
+  })
 })

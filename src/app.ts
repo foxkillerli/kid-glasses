@@ -175,10 +175,12 @@ export interface AppOptions {
   fetch?: (url: string, init: RequestInit) => Promise<Response>
   store?: AsyncStore
   voiceTailMs?: number
+  micCloseWaitMs?: number
 }
 
 const VOICE_MAX_MS = 60_000
 const VOICE_TAIL_MS = 250
+const MIC_CLOSE_WAIT_MS = 1_000
 const FLASH_MS = 12_000
 
 const ERROR_TEXT: Record<string, string> = {
@@ -232,6 +234,7 @@ export class App {
   private asrLang: AsrLang = 'auto'
   private readonly store: AsyncStore
   private readonly voiceTailMs: number
+  private readonly micCloseWaitMs: number
   private readonly glyphs = glyphPages()
   private readonly caps: CapacityPage[] = capacityPages(FULL_GEOMETRY)
   private hb: HeartbeatState
@@ -285,6 +288,7 @@ export class App {
     const store = opts.store ?? new BridgeStore(this.bridge as unknown as Partial<import('./lib/store').BridgeStorage>, storage)
     this.store = store
     this.voiceTailMs = opts.voiceTailMs ?? VOICE_TAIL_MS
+    this.micCloseWaitMs = opts.micCloseWaitMs ?? MIC_CLOSE_WAIT_MS
     const timers = {
       setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
       clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
@@ -321,7 +325,8 @@ export class App {
           if (cid && cid === this.liveCid) this.clearLive()
           this.showFlash(ERROR_TEXT[code] ?? `出错了：${code}`)
         },
-        asr: (kind, text) => {
+        asr: (kind, text, cid) => {
+          if (cid && cid !== this.liveCid) return
           this.voice.partial = text
           if (kind === 'final' && !text) this.voice.partial = ''
           if (this.liveCid) {
@@ -809,7 +814,7 @@ export class App {
     const m = this.mic
     const pcm = a.audioPcm
     if (!pcm) return
-    if (this.voice.active || this.voice.tailing) {
+    if (this.voice.active || (this.voice.tailing && !this.mic.recording)) {
       const verdict = checkFrameSource(a.source, raw)
       if (!verdict.accept) {
         this.voice.dropped++
@@ -1009,7 +1014,7 @@ export class App {
     }
     let r: unknown
     try {
-      r = await closeGlassesMic(this.bridge)
+      r = await Promise.race([closeGlassesMic(this.bridge), new Promise(res => setTimeout(() => res('pending'), this.micCloseWaitMs))])
     } catch (err) {
       r = `throw ${String(err).slice(0, 40)}`
     }
@@ -1029,7 +1034,7 @@ export class App {
 
   private async startRecording(mode: 'long' | 'tap'): Promise<void> {
     const m = this.mic
-    if (this.voice.active) return
+    if (this.voice.active || this.voice.tailing) return
     m.recording = true
     m.mode = mode
     m.startedAt = Date.now()

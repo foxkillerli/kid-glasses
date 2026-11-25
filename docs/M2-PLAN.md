@@ -73,3 +73,15 @@ Plugin (`src/app.ts`, `src/lib/relay-client.ts`):
 - Retry needs the unfinalized audio to fit in 15 s. A drop during a long sentence with no pause may not be recoverable.
 - Traditional Chinese is not in the `multi` table; `zh-CN` returns Simplified.
 - Not verified end to end against real Deepgram from the desktop: there is no device token or Deepgram key on the desktop. The real-device test (`docs/M2-DEVICE-TEST.md`) covers it.
+
+## Review
+
+- Codex (gpt-6.2-sol, critical-review, change `m2-deepgram-turn`, round 1): PASS, 0 BLOCK, 6 FIX_NEXT.
+- Fixed before the first deploy:
+  - M2-1: a reconnect re-checks the buffer before replaying, so audio trimmed while waiting is a reported drop, never a gap.
+  - M2-2: the plugin sends `audio.stop` at most 1 s after release even if the mic close never answers, and a diagnostic recording cannot feed a tailing voice turn.
+  - M2-3: a hung Deepgram upgrade is aborted on timeout or cancel, and `start()` no longer waits for it.
+  - M2-4: a close before `CloseStream` is retried; an interim is posted only at the 5 s deadline.
+  - M2-5: `asr.partial` / `asr.final` carry the turn `cid`, and the plugin ignores another turn's transcript.
+- Left for later (from M1): M2-6, a Slack post that never returns blocks later voice turns. `chat.postMessage` has no deadline.
+

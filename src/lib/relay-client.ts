@@ -44,7 +44,7 @@ export interface RelayEvents {
   items(items: RelayItem[], kind: 'live' | 'replay' | 'history'): void
   posted(seq: number, cid: string | undefined, dup: boolean): void
   error(code: string, message: string, cid: string | undefined): void
-  asr(kind: 'partial' | 'final', text: string): void
+  asr(kind: 'partial' | 'final', text: string, cid?: string): void
   webhook(result: string, status: number | null): void
   outbox(entries: OutboxEntry[]): void
 }
@@ -362,7 +362,7 @@ export class RelayClient {
       }
       case 'asr.partial':
       case 'asr.final':
-        this.deps.events.asr?.(m.t === 'asr.partial' ? 'partial' : 'final', String(m.text ?? ''))
+        this.deps.events.asr?.(m.t === 'asr.partial' ? 'partial' : 'final', String(m.text ?? ''), typeof m.cid === 'string' ? m.cid : undefined)
         return
       case 'kid-webhook':
         this.deps.events.webhook?.(String(m.result), typeof m.status === 'number' ? m.status : null)
