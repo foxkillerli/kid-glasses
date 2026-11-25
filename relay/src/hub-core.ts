@@ -6,7 +6,7 @@ import type { KidWebhook } from './kid-webhook'
 import { errorName } from './log'
 import { PAIR_CODE_RE, PAIR_ID_RE, type Pairing } from './pairing'
 import { HistoryStore, PAGE_MAX, type HistoryItem, type KvStorage } from './history'
-import { MAX_SAY_CHARS, parseClientMessage, type ServerMessage, type WireItem } from './protocol'
+import { parseClientMessage, type ServerMessage, type WireItem } from './protocol'
 import { MAX_OUTGOING_CHARS, clip, cleanText, fromSlack, isFromGlasses, toSlack } from './sanitize'
 import type { KidMessage } from './slack-events'
 import { ChannelNotAllowedError, SlackApiError, SlackConfigError, slackErrorIsUncertain, type PostResult } from './slack-client'
@@ -62,7 +62,7 @@ export const PENDING_AUDIO_CAP = 100
 export const VOICE_PENDING_KEY = 'meta:voice-pending'
 export const VOICE_PENDING_CAP = 20
 export const VOICE_PENDING_TTL_MS = 12 * 60 * 60 * 1000
-export const RECONCILE_SETTLE_MS = 30_000
+export const RECONCILE_SETTLE_MS = 120_000
 const RECONCILE_HISTORY_PAGES = 4
 export const CLOSE_UNAUTHORIZED = 4401
 export const CLOSE_NOT_CONFIGURED = 4503
@@ -81,12 +81,6 @@ interface PendingVoice {
   threadTs?: string | null
 }
 
-function fitUtf16(s: string, max: number): string {
-  if (s.length <= max) return s
-  const chars = Array.from(s)
-  while (chars.join('').length > max) chars.pop()
-  return chars.join('')
-}
 
 interface CidEntry {
   cid: string
@@ -280,14 +274,14 @@ export class HubCore {
   }
 
   private async keepPendingVoice(cid: string, raw: string, target: Session): Promise<void> {
-    const text = fitUtf16(clip(cleanText(raw), MAX_SAY_CHARS), MAX_SAY_CHARS)
+    const text = clip(cleanText(raw), MAX_OUTGOING_CHARS)
     if (!text) return
     const prior = (await this.pendingVoice()).find(p => p.cid === cid)
     const entry: PendingVoice = prior ? { ...prior, text } : { cid, text, at: this.deps.now(), session: target.id, threadTs: target.threadTs }
     const list = [...(await this.pendingVoice()).filter(p => p.cid !== cid), entry].slice(-VOICE_PENDING_CAP)
     await this.deps.storage.put(VOICE_PENDING_KEY, list)
     this.log(`voice pending kept n=${list.length}`)
-    this.broadcast({ t: 'turn.pending', cid, text })
+    if (!prior) this.broadcast({ t: 'turn.pending', cid, text })
   }
 
   private async dropPendingVoice(cid: string | undefined): Promise<void> {

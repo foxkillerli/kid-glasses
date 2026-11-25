@@ -1,6 +1,6 @@
 import { ASR_LANGS, type AsrLang } from './deepgram'
 
-export const MAX_SAY_CHARS = 2000
+export const MAX_SAY_CHARS = 3000
 export const CID_RE = /^[A-Za-z0-9_-]{8,64}$/
 
 export type Speaker = 'kid' | 'glasses' | 'fast'

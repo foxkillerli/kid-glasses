@@ -66,7 +66,7 @@ const OPEN = 1
 const CONNECTING = 0
 export const CLOSE_UNAUTHORIZED = 4401
 const PENDING_CID_RE = /^[A-Za-z0-9_-]{8,64}$/
-const MAX_PENDING_CHARS = 2000
+const MAX_PENDING_CHARS = 3000
 const FLUSH_FALLBACK_MS = 5_000
 
 export function backoffDelay(attempt: number, random: number, baseMs: number = RELAY_TIMING.backoffBaseMs, maxMs: number = RELAY_TIMING.backoffMaxMs): number {

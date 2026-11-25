@@ -148,7 +148,7 @@ describe('logs never contain secrets, ids that identify channels, or message tex
     await core.turnsSettled
     expect(device.of('turn.pending')).toHaveLength(1)
     hang = false
-    now += 31_000
+    now += 121_000
     await core.onDeviceMessage(device, JSON.stringify({ t: 'hello', lastSeq: 0 }))
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid, text: S.text }))
     await core.onDeviceMessage(device, JSON.stringify({ t: 'session.new' }))

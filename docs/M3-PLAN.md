@@ -59,7 +59,7 @@ Same recipe as M2: the relay with `keep_bindings: ["secret_text"]` and no migrat
 - **Round 1** (codex gpt-6.2-sol, critical-review, change `m3-polish`): FAIL, 1 BLOCK, 5 FIX_NEXT, 1 NOTE.
 - **BLOCK M3-01**: one voice cid could produce two Slack posts. Fixed:
   - Slack errors that can follow a write (`internal_error`, `fatal_error`, `request_timeout`, `service_unavailable`, `http_5xx`) count as uncertain, so the resend reconciles first.
-  - A resend of an uncertain cid that reconciles to nothing within 30 s of the failure posts nothing (`slack-unreachable`, retried later), so a late-landing first write is found next time.
+  - A resend of an uncertain cid that reconciles to nothing within 120 s of the failure posts nothing (`slack-unreachable`, retried later), so a late-landing first write is found next time. With the plugin's 10 s / 30 s / 90 s schedule the third resend (about 130 s) is the first that may post.
   - Reconcile refuses to guess when Slack says `has_more` without a cursor.
   - Reconcile compares text with Slack's link formatting (`<url|label>`, `<mailto:…>`) removed.
   - The plugin flushes its outbox after `replay.done`, not at `auth.ok`, so a post it missed the ack for is acked by the replay first (5 s fallback if no `replay.done` arrives).
@@ -70,6 +70,10 @@ Same recipe as M2: the relay with `keep_bindings: ["secret_text"]` and no migrat
   - M3-04: a pending voice resend goes to the session and thread of its first attempt.
   - M3-05: an adopted transcript shows `重发` at once, and `新对话` only confirms if `session.new` was actually sent.
   - M3-06: an auth timeout closes with 4408 instead of 4401, so no plugin forgets its token because of a slow first frame.
+- **Round 2 / round 3** (same change): round 2 was refused by the review tool until the round-1 counterexamples all passed; the cid-retention fix made them pass (6/6). Round 3: FAIL, 2 BLOCK, 4 FIX_NEXT.
+  - **M3-R3-01** (introduced by the round-2 fix): the pending text was cut to fit 2000 UTF-16 units, so a resend of a long transcript no longer matched the original post and posted a shortened copy. Fixed: the pending text is the transcript clipped exactly as the Slack post (1500 code points), and the `say` limit is raised to 3000 UTF-16 units on both sides. A failed resend no longer re-offers `turn.pending`.
+  - **M3-01, still open (design decision for user):** if Slack completes a write long after our request timed out, after a reconcile has already seen an empty history, the resend posts a second copy. No finite wait can rule this out, because `chat.postMessage` has no idempotency key. M3 narrows it to a write landing more than 120 s after the timeout. The only complete fix is never auto-resending a post whose outcome is uncertain, which instead loses those messages: the lens would say `可能没发出去，请看 Slack`. The 5000-entry hard cap on the cid record is the other bound (5000 posts within 12 h).
+  - FIX_NEXT accepted for later: the outbox does not backfill pending voice when it frees up (the next `hello` re-offers it); `Retry-After` is not passed to the plugin; reconcile's history exclusion covers the newest 200 items; a pending entry that expires just before the resend posts into the current thread; an M3 plugin against the M2 relay still forgets its token on the old 4401 auth timeout (deploy the relay first).
 - **Left as is:** Slack `Retry-After` is not passed to the plugin's resend schedule; the plugin retries at 10 s / 30 s / 90 s regardless.
 - **NOTE M3-07:** the phone-log test no longer claims to cover pairing codes (the relay pairing log guard covers them).
 

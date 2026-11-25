@@ -349,7 +349,7 @@ describe('RelayClient M3', () => {
     await a.online()
     a.last().frame({ t: 'turn.pending', cid: 'bad cid!', text: 'x' })
     a.last().frame({ t: 'turn.pending', cid: 'voice-cid-0002', text: '   ' })
-    a.last().frame({ t: 'turn.pending', cid: 'voice-cid-0003', text: 'x'.repeat(2001) })
+    a.last().frame({ t: 'turn.pending', cid: 'voice-cid-0003', text: 'x'.repeat(3001) })
     expect(a.client.pending).toEqual([])
     a.last().frame({ t: 'turn.pending', cid: 'voice-cid-0004', text: '重启后还在' })
     const b = setup({ store: a.store })

@@ -3,6 +3,8 @@ import { DISABLED_FAST_LANE } from '../src/fast-lane'
 import { CIDS_KEY, CID_CAP, CID_HARD_CAP, CID_PROTECT_MS, HubCore, RECONCILE_SETTLE_MS, VOICE_PENDING_CAP, VOICE_PENDING_KEY, VOICE_PENDING_TTL_MS, type HubDeps } from '../src/hub-core'
 import { Pairing } from '../src/pairing'
 import { DeepgramUpgradeError } from '../src/deepgram'
+import { parseClientMessage } from '../src/protocol'
+import { toSlack } from '../src/sanitize'
 import { KidDmClient, SlackApiError, SlackConfigError } from '../src/slack-client'
 import { FakeAsr, FakeDevice, FakeStorage, flush, FakeTimers } from './fakes'
 
@@ -352,6 +354,25 @@ describe('M3 round 2: no double posts, original thread', () => {
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '同一句', cid: CID }))
     expect(excluded[0]).toContain('1700000000.001')
     expect(n).toBe(3)
+  })
+
+  it('review R3-01: the pending text of a long transcript posts exactly the same Slack text, so reconcile can match it; a failed resend does not re-offer it', async () => {
+    const asr = new FakeAsr()
+    const long = '𠀀'.repeat(1001)
+    const { core, device } = setup({
+      asr: { connect: async () => asr },
+      slack: { selfUserId: async () => FOX, postToKid: async () => Promise.reject(new TypeError('down')) },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    asr.result(long, true, { start: 0, duration: 0.1 })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    asr.result('', true, { fromFinalize: true })
+    await core.turnsSettled
+    const pending = device.of('turn.pending')[0] as { text: string }
+    expect(toSlack(pending.text)).toBe(toSlack(long))
+    expect(parseClientMessage(JSON.stringify({ t: 'say', cid: CID, text: pending.text })).ok).toBe(true)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid: CID, text: pending.text }))
+    expect(device.of('turn.pending')).toHaveLength(1)
   })
 
   it('a pending voice resend goes to the thread of its first attempt, even after 新对话', async () => {
