@@ -8,7 +8,7 @@
     "build": "tsc --noEmit && vite build",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "pack": "npm run build && evenhub pack app.json dist --sdk-ver 0.0.16 -o kid-glasses.ehpk",
+    "pack": "npm run build && evenhub pack app.json dist --sdk-ver 0.0.16 -o grok-connector.ehpk",
     "simulate": "evenhub-simulator http://localhost:5173 --automation-port 9898",
     "qr": "evenhub qr --url https://kid-glasses-m0.your-subdomain.workers.dev",
     "relay:typecheck": "npm --prefix relay run typecheck",

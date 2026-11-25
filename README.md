@@ -78,7 +78,7 @@ npm run build
 npm run pack
 ```
 
-`npm run pack` runs `evenhub pack app.json dist --sdk-ver 0.0.16` and writes `kid-glasses.ehpk`, which is gitignored.
+`npm run pack` runs `evenhub pack app.json dist --sdk-ver 0.0.16` and writes `grok-connector.ehpk`, which is gitignored.
 
 A packaged `.ehpk` can only reach a phone by uploading it to the Even Hub portal as a Private build (portal → Builds, then on the phone Even Hub → Me → Apps → Private builds). **M0 does not upload anything.** Real-device testing uses the QR dev mode against the Cloudflare-hosted build below.
 

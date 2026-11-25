@@ -1,8 +1,8 @@
 {
   "package_id": "com.foxkiller.kidglasses",
   "edition": "202601",
-  "name": "Kid Glasses M1",
-  "version": "0.0.2",
+  "name": "Grok Connector",
+  "version": "0.0.3",
   "min_sdk_version": "0.0.16",
   "entrypoint": "index.html",
   "permissions": [
