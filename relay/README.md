@@ -47,7 +47,7 @@ On a redeploy:
 |---|---|
 | `wrangler.jsonc` | Worker `kid-glasses-relay`; DO binding `HUB` → `RelayHub`; migration `v1` with `new_sqlite_classes` (the Workers Free plan only allows SQLite-backed DOs); non-secret vars |
 | `src/index.ts` | Router: `GET /health`, `GET /device` (WebSocket), `POST /slack/events` |
-| `src/hub.ts` | `RelayHub` Durable Object: WebSocket Hibernation API for devices (a per-socket attachment records `authed`), an alarm that closes sockets still unauthenticated after 10 s, SQLite-backed KV storage |
+| `src/hub.ts` | `RelayHub` Durable Object: WebSocket Hibernation API for devices (a per-socket attachment records `authed`), an alarm that closes sockets still unauthenticated after 10 s (`sweepUnauthed` in `src/device-auth.ts`, 100 ms slack, re-armed for the earliest remaining deadline), SQLite-backed KV storage |
 | `src/hub-core.ts` | Hub logic, runtime-free so it can be tested: sessions, threads, history, ASR flow, fast lane |
 | `src/slack-verify.ts` | Slack signing-secret check (`v0:ts:body`, HMAC-SHA256, 5 min skew, constant-time compare) |
 | `src/slack-events.ts` | Event routing for the bot-DM model (see "Inbound rules") |
@@ -185,7 +185,8 @@ Each route fails closed when its secret is missing:
 | `posted` | The message reached Slack: `seq`, `text`, `cid` if one was given, `dup: true` for a re-ack |
 | `kid-webhook` | `seq`, `result` = `ok` / `skipped` / `failed`, and `status`. Sent after each `posted` |
 | `history` | A page of older messages |
-| `error` | `code`, `message`, and `cid` when the error belongs to a turn (`asr-interrupted`, `asr-empty`, `asr-connect-failed`, `asr-rejected` for Deepgram HTTP 401/402/403, `asr-no-audio` after 10 s without frames, Slack post failures) |
+| `error` | `code`, `message`, and `cid` when the error belongs to a turn (`asr-interrupted`, `asr-empty`, `asr-connect-failed`, `asr-rejected` for Deepgram HTTP 401/402/403, `asr-no-audio` after 10 s without frames, Slack post failures). Before closing an unauthenticated socket the relay sends `auth-timeout` (M3) |
+| `turn.pending` | M3: `{cid, text}` of a voice transcript whose Slack post failed transiently. Sent when it fails and again after each `hello`. The device resends it as `say {cid, text}`; the relay clears it once that cid posts (or reconciles) |
 | `pong` | Reply to `ping` |
 
 **Resend without double posting.** The plugin keeps every `say` it has not seen acknowledged in a persisted outbox. After each reconnect, and after a page reload, it sends them again with the same `cid`.
@@ -197,7 +198,9 @@ Each route fails closed when its secret is missing:
   - **Uncertain** (network error, or the DO died mid-call): the mark stays. On the resend the relay first looks for its own message with the same text in that thread or the DM (`conversations.replies` / `conversations.history`, `im:history`). If it finds one, it records that post and calls the webhook; if not, it posts. If Slack cannot be checked, it posts nothing and reports `slack-unreachable`.
 - The plugin retries errors that are not permanent on the same socket, after 10 s, 30 s and 90 s, with the same cid. A turn is given up after 4 errors.
 - Reconcile skips Slack messages already recorded for another cid, so two turns with the same text in one thread are never confused. A reconciled post keeps its original session and thread.
-- Not covered: a voice turn whose transcript Slack rejects is not retried, because its text is not kept on the device. Reconcile reads one page (200 messages) of the thread or DM.
+- Voice turns (M3): if the Slack post of a transcript fails with anything but a config/channel refusal, the relay keeps `{cid, text}` in `meta:voice-pending` (at most 20, 12 h) and offers it as `turn.pending`. The plugin adopts it into its outbox, so it follows the same retry and dedupe rules as a typed `say`.
+- Every Slack API call has a 10 s deadline that covers the body too (`SlackTimeoutError`). `chat.postMessage` is never retried inside the call; a timeout counts as uncertain. `auth.test` and `conversations.*` retry once on a timeout, network error or 5xx.
+- Reconcile follows `next_cursor` for up to 5 pages of 200 messages. If it is still not sure after 5 pages it posts nothing and reports `slack-unreachable`.
 - A duplicate is answered from history and never calls Slack or the Kid webhook.
 - `msg` / `history` items for glasses turns carry their `cid`, so a replay clears the outbox as well.
 - A voice turn cannot be resent from the device: the audio is kept only on the relay, for at most 15 s of not-yet-finalized speech, to survive a Deepgram drop. If the device socket drops mid-turn, the turn is cancelled.
@@ -291,4 +294,5 @@ These are unverified or not built yet:
 
 - **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. Fox is excluded three ways: the installing user from `authorizations` (router), the token owner from `auth.test` (hub), and any text starting with `〔眼镜〕`.
 - **ASR limits.** The relay stops a turn after 62 s of audio (the plugin stops at 60 s). Retry, timeouts and the chosen Deepgram config are in [`docs/M2-PLAN.md`](../docs/M2-PLAN.md). The Deepgram `Authorization` header through the outbound upgrade is confirmed by M1's device test.
-- **Plugin client.** The M1 plugin client (device-side WebSocket, entering `DEVICE_TOKEN` on the phone, paging replies with `LENS_TEXT`) is not written yet.
+- **Unauthenticated close timing.** The alarm closes an idle unauthenticated socket about 10.1 s after it connects. A client that just waits sees the close frame then, but its `close` event only fires about 10 s later, when the TCP connection is torn down after the server-initiated close (measured 2026-11-25: close frame at 10.5 s, `close` event at 20.6 s; a client-initiated close takes 20–280 ms). The `auth-timeout` frame lets a client close its own side at once; the plugin does.
+- **Slack.** M3 bounds every Slack call, but a Slack outage longer than the plugin's retry schedule still ends with the turn dropped from the outbox (the relay offers a pending voice transcript again after the next `hello`, for 12 h).

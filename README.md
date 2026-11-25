@@ -2,7 +2,7 @@
 
 An Even Realities G2 plugin for Even Hub. The end goal is a voice "Kid panel": voice in → relay → Slack → Fox's assistant bot → text back on the lenses.
 
-**M0 (this milestone) only probes what the device can do.** It has no Slack, Deepgram or secrets of any kind. Its only Cloudflare use is static hosting of the test build plus a WebSocket echo (see below). The M1 relay lives in `relay/`. It is deployed at <https://kid-glasses-relay.your-subdomain.workers.dev> with no secrets yet.
+**Status (2026-11-25).** M1 (relay, pairing, Slack) and M2 (Deepgram streaming) are deployed: the plugin at <https://kid-glasses-m0.your-subdomain.workers.dev>, the relay in `relay/` at <https://kid-glasses-relay.your-subdomain.workers.dev>. M3 (polish, [`docs/M3-PLAN.md`](docs/M3-PLAN.md)) is on branch `m3` and not deployed yet. The M0 probe pages below are still in the menu.
 
 | Page | What it probes |
 |---|---|
@@ -165,10 +165,12 @@ The plugin opens on the **Kid** page.
 - Audio comes from the G2 glasses mic only, through the same `checkFrameSource` gate as M0.
 - It streams to the relay (Deepgram); the transcript is posted to Slack as `〔眼镜〕…` and Kid's webhook is called.
 - The live transcript shows as `你说：…` while you talk. After release the plugin keeps forwarding frames for the mic close plus 250 ms, then sends `audio.stop`, so the last words are not cut off.
+- **New conversation** (M3): the menu's third item `新对话（Slack 新话题）` sends `session.new`, so the next message starts a new Slack thread.
+- **Lost-post recovery** (M3): if Slack fails after a transcript is ready, the relay sends `turn.pending` and the plugin resends it from its outbox with the same cid. The status line shows `待发N` while offline and `重发N` while a resend is scheduled.
 - **Language** (M2): the menu's second item cycles `自动（中英）` → `中文` → `English`. The choice is stored on the phone and sent with every `audio.start`. Config and limits: [`docs/M2-PLAN.md`](docs/M2-PLAN.md); device test: [`docs/M2-DEVICE-TEST.md`](docs/M2-DEVICE-TEST.md).
 - Kid's replies appear on the lens, paginated with `LENS_TEXT`.
 
-**Paging** (`src/lib/conversation.ts`). Pages flip when they fill, never on a timer.
+**Paging** (`src/lib/conversation.ts`). Pages flip when they fill, never on a timer. When the current page is not the last one, the hint line says `↓ 下面还有 下滑查看 N/M` (M3).
 
 - Growing content (the live transcript `你说：…` in the body while you talk, and each new message) keeps the view on the page that holds the newest text, so it advances the moment the current page fills.
 - After you swipe back to an older page, re-layout and redraws leave you there. New content (a new transcript chunk or a new message) brings you back to the newest page, and fill-triggered advance resumes. The relay echoing a turn already shown as `我（待发）` does not count as new.
