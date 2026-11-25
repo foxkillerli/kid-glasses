@@ -8,7 +8,7 @@ import { Pairing } from '../src/pairing'
 import { KidDmClient } from '../src/slack-client'
 import { slackSignature } from '../src/slack-verify'
 import type { Env } from '../src/env'
-import { FakeDevice, FakeStorage, flush } from './fakes'
+import { FakeDevice, FakeStorage, flush, FakeTimers } from './fakes'
 
 const S = {
   slackToken: ['xoxp', 'SENTINELTOKEN', '1111'].join('-'),
@@ -48,6 +48,7 @@ function hub(slackFetch: typeof fetch, webhookFetch: (u: string, i: RequestInit)
     deviceToken: S.deviceToken,
     slack: new KidDmClient(S.slackToken, S.channel, slackFetch),
     asr: { connect: async () => { if (asrFail) throw new Error(`connect ${S.asr} ${S.webhookUrl}`); throw new Error('unused') } },
+    timers: new FakeTimers(),
     fastLane: DISABLED_FAST_LANE,
     kidWebhook: new KidWebhookClient(S.webhookUrl, S.webhookSecret, { fetchFn: webhookFetch, sleep: async () => {} }),
     pairing: new Pairing({ storage, now: () => Date.now() }),

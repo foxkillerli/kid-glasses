@@ -11,6 +11,7 @@
   "vars": {
     "DEEPGRAM_MODEL": "nova-3",
     "DEEPGRAM_LANGUAGE": "multi",
+    "DEEPGRAM_LANGUAGE_HINTS": "zh,en",
     "FAST_LANE_ENABLED": "false"
   }
 }

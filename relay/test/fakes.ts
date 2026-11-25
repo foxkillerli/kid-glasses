@@ -61,7 +61,9 @@ export class FakeAsr implements AsrSocket {
   send(data: string | ArrayBuffer | ArrayBufferView): void {
     this.sent.push(data)
   }
+  closedWith: number | null = null
   close(code = 1000): void {
+    this.closedWith = code
     this.emit('close', { code })
   }
   addEventListener(type: 'message' | 'close' | 'error', listener: (ev: { data?: unknown; code?: number }) => void): void {
@@ -70,8 +72,53 @@ export class FakeAsr implements AsrSocket {
   emit(type: string, ev: { data?: unknown; code?: number }): void {
     for (const l of this.listeners[type] ?? []) l(ev)
   }
-  result(transcript: string, isFinal: boolean): void {
-    this.emit('message', { data: JSON.stringify({ type: 'Results', is_final: isFinal, speech_final: isFinal, channel: { alternatives: [{ transcript }] } }) })
+  result(transcript: string, isFinal: boolean, o: { start?: number; duration?: number; fromFinalize?: boolean } = {}): void {
+    this.emit('message', {
+      data: JSON.stringify({
+        type: 'Results',
+        is_final: isFinal,
+        speech_final: isFinal,
+        from_finalize: !!o.fromFinalize,
+        start: o.start ?? 0,
+        duration: o.duration ?? 0,
+        channel: { alternatives: [{ transcript }] },
+      }),
+    })
+  }
+  texts(): string[] {
+    return this.sent.filter((d): d is string => typeof d === 'string')
+  }
+  audio(): Uint8Array[] {
+    return this.sent.filter((d): d is Uint8Array => typeof d !== 'string') as Uint8Array[]
+  }
+}
+
+export class FakeTimers {
+  now = 0
+  private seq = 0
+  private readonly due = new Map<number, { at: number; fn: () => void }>()
+  set(fn: () => void, ms: number): unknown {
+    const id = ++this.seq
+    this.due.set(id, { at: this.now + ms, fn })
+    return id
+  }
+  clear(h: unknown): void {
+    this.due.delete(h as number)
+  }
+  get pending(): number {
+    return this.due.size
+  }
+  advance(ms: number): void {
+    const end = this.now + ms
+    for (;;) {
+      let next: [number, { at: number; fn: () => void }] | null = null
+      for (const e of this.due) if (e[1].at <= end && (!next || e[1].at < next[1].at || (e[1].at === next[1].at && e[0] < next[0]))) next = e
+      if (!next) break
+      this.due.delete(next[0])
+      this.now = next[1].at
+      next[1].fn()
+    }
+    this.now = end
   }
 }
 

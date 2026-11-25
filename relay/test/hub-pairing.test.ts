@@ -3,7 +3,8 @@ import { DISABLED_FAST_LANE } from '../src/fast-lane'
 import { CIDS_KEY, CID_CAP, HubCore, type HubDeps } from '../src/hub-core'
 import { Pairing } from '../src/pairing'
 import { SlackApiError } from '../src/slack-client'
-import { FakeAsr, FakeDevice, FakeStorage, flush } from './fakes'
+import { DeepgramUpgradeError } from '../src/deepgram'
+import { FakeAsr, FakeDevice, FakeStorage, flush, FakeTimers } from './fakes'
 
 const FOX = 'UFOX0001'
 const SHARED = 's'.repeat(40)
@@ -28,6 +29,7 @@ function setup(over: Partial<HubDeps> = {}) {
       }),
     },
     asr: { connect: async () => asr },
+    timers: new FakeTimers(),
     fastLane: DISABLED_FAST_LANE,
     pairing,
     now: () => now,
@@ -111,10 +113,53 @@ describe('say dedupe by cid', () => {
   })
 
   it('an interrupted voice turn reports its cid', async () => {
-    const { core, device, asr } = setup()
+    const { core, device, asr } = setup({ asrLimits: { maxReconnects: 0 } })
     await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
     asr.close(1006)
     expect(device.of('error')).toEqual([expect.objectContaining({ code: 'asr-interrupted', cid: CID })])
+  })
+})
+
+describe('M2 voice turn options', () => {
+  it('passes the per-turn language to the connector, defaults to auto, and rejects unknown languages', async () => {
+    const langs: string[] = []
+    const { core, device } = setup({ asr: { connect: async lang => (langs.push(lang), new FakeAsr()) } })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID, lang: 'zh' }))
+    core.cancelAsr('test')
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: 'cid-second-1' }))
+    core.cancelAsr('test')
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: 'cid-third-01', lang: 'fr' }))
+    expect(langs).toEqual(['zh', 'auto'])
+    expect(device.of('error').map(e => e.message)).toEqual(['bad-lang'])
+  })
+
+  it('the owner socket going away mid-talk cancels the turn; after audio.stop it still posts', async () => {
+    const asr = new FakeAsr()
+    const { core, device, posts } = setup({ asr: { connect: async () => asr } })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    core.onDeviceGone(new FakeDevice())
+    expect(core.recording).toBe(true)
+    core.onDeviceGone(device)
+    expect(core.recording).toBe(false)
+    expect(asr.closedWith).toBe(1000)
+    await core.turnsSettled
+    expect(posts).toEqual([])
+    const asr2 = new FakeAsr()
+    const s2 = setup({ asr: { connect: async () => asr2 } })
+    await s2.core.onDeviceMessage(s2.device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    asr2.result('到了', true, { start: 0, duration: 0.1 })
+    await s2.core.onDeviceMessage(s2.device, JSON.stringify({ t: 'audio.stop' }))
+    s2.core.onDeviceGone(s2.device)
+    asr2.result('', true, { fromFinalize: true })
+    await s2.core.turnsSettled
+    expect(s2.posts).toEqual(['〔眼镜〕到了'])
+  })
+
+  it('a refused Deepgram key reaches the device as asr-rejected with the cid', async () => {
+    const { core, device } = setup({ asr: { connect: async () => Promise.reject(new DeepgramUpgradeError(402)) } })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    expect(device.of('error')).toEqual([expect.objectContaining({ code: 'asr-rejected', cid: CID })])
+    expect(core.recording).toBe(false)
   })
 })
 

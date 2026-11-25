@@ -11,7 +11,7 @@ This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 pl
 - Slack Events request URL: `https://kid-glasses-relay.your-subdomain.workers.dev/slack/events`
 - Worker: `kid-glasses-relay`, Workers Free plan, workers.dev only.
 - Durable Object namespace: `kid-glasses-relay_RelayHub`, class `RelayHub`, SQLite storage. Migration `v1` (`new_sqlite_classes`) is applied.
-- Plain-text vars only: `DEEPGRAM_MODEL=nova-3`, `DEEPGRAM_LANGUAGE=multi`, `FAST_LANE_ENABLED=false`.
+- Plain-text vars only: `DEEPGRAM_MODEL=nova-3`, `DEEPGRAM_LANGUAGE=multi`, `DEEPGRAM_LANGUAGE_HINTS=zh,en`, `FAST_LANE_ENABLED=false`.
 
 Fox's setup steps are in [`../docs/M1-FOX-SETUP.md`](../docs/M1-FOX-SETUP.md).
 
@@ -53,7 +53,8 @@ On a redeploy:
 | `src/slack-events.ts` | Event routing for the bot-DM model (see "Inbound rules") |
 | `src/slack-client.ts` | `chat.postMessage` with Fox's `xoxp-` token. It throws `ChannelNotAllowedError` for any channel except `KID_DM_CHANNEL_ID`, which must be a `D…` id, before any request is made |
 | `src/sanitize.ts` | Outgoing: `〔眼镜〕` prefix, Slack `& < >` escaping (no mentions can form), control-char removal, 1500-char cap. Incoming: Slack markup to plain lens text, 2000-char cap |
-| `src/deepgram.ts` | Streaming URL (`linear16`, 16 kHz, mono, `nova-3` + `multi`), result parsing, transcript joining (no spaces between CJK) |
+| `src/deepgram.ts` | Streaming URL per turn language (`linear16`, 16 kHz, mono; `auto` = `nova-3` + `multi` + `language_hint` zh/en, `zh` = `zh-CN`, `en` = `en`), message parsing, transcript joining (no spaces between CJK) |
+| `src/asr-turn.ts` | One voice turn against Deepgram: connect timeout and fallback, KeepAlive, Finalize on stop, final-wait timeout, reconnect with replay of unfinalized audio, watchdogs, content-free metrics. See [`docs/M2-PLAN.md`](../docs/M2-PLAN.md) |
 | `src/history.ts` | Paged message history in DO storage, newest 500 kept |
 | `src/device-auth.ts` | Device token check, done on the first WebSocket frame and never in the handshake |
 | `src/protocol.ts` | Device message types and validation |
@@ -131,7 +132,8 @@ Fox enters every secret himself, in the Cloudflare dashboard or with `wrangler s
 | `DEEPGRAM_API_KEY` | secret | Deepgram key |
 | `DEVICE_TOKEN` | secret | ≥ 32 chars, e.g. `openssl rand -hex 32` |
 | `FAST_LLM_KEY` | secret, optional | Only used if the fast lane is enabled |
-| `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | var | Default `nova-3` / `multi`. If Mandarin accuracy is poor, try `language=zh-CN`. |
+| `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | var | Default `nova-3` / `multi`. `DEEPGRAM_LANGUAGE` is used for the plugin's `自动` setting; `中文` always uses `zh-CN` and `English` uses `en`. |
+| `DEEPGRAM_LANGUAGE_HINTS` | var | Default `zh,en`. Sent as `language_hint` only with `multi`. Invalid codes are dropped; if Deepgram still rejects the URL with HTTP 400, the turn falls back to `nova-3` + `multi` without hints. |
 | `FAST_LANE_ENABLED` | var | `"false"` |
 | `KID_BOT_ID` / `KID_BOT_USER_ID` | var, optional | Pin the Kid bot identity (see "Inbound rules") |
 | `KID_WEBHOOK_URL` | secret, optional | Kid's webhook routine (`https://…`) |
@@ -163,10 +165,10 @@ Each route fails closed when its secret is missing:
 | `{"t":"auth","token":"…"}` | Must be the first frame. `token` is `DEVICE_TOKEN` or a paired device token (`kgd_…`) |
 | `{"t":"hello","lastSeq":N}` | The relay replies with `hello` and replays every retained message after `N` |
 | `{"t":"say","text":"…","cid":"…"}` | Post text to Kid. `cid` (8–64 of `A-Za-z0-9_-`, e.g. a UUID) is optional. A repeated `cid` is not posted again: the relay re-acks with `posted {seq, cid, dup: true}` |
-| `{"t":"audio.start","cid":"…"}` | Start a speech turn. The transcript is posted with this `cid`. The turn belongs to that socket: audio, `audio.stop` and `audio.cancel` from other devices are ignored, and a second `audio.start` gets `error asr-busy` |
+| `{"t":"audio.start","cid":"…","lang":"auto"}` | Start a speech turn. `lang` is `auto` (default), `zh` or `en`; anything else gets `error bad-message bad-lang`. The transcript is posted with this `cid`. The turn belongs to that socket: audio, `audio.stop` and `audio.cancel` from other devices are ignored, and a second `audio.start` gets `error asr-busy` |
 | binary frames | PCM 16 kHz s16le mono, about 3200 B per 100 ms |
-| `{"t":"audio.cancel"}` | Abandon the turn: nothing is posted. The relay also cancels a turn whose last device disconnects before `audio.stop` |
-| `{"t":"audio.stop"}` | End the turn. Deepgram's final transcript is posted to Kid. If the stream fails or closes before the stop, the relay sends `error asr-interrupted` and posts nothing |
+| `{"t":"audio.cancel"}` | Abandon the turn: nothing is posted. The relay also cancels a turn whose owner socket closes before `audio.stop` |
+| `{"t":"audio.stop"}` | End the turn. The relay sends `Finalize`, posts as soon as Deepgram's `from_finalize` result arrives (or on the close after `CloseStream`), and after 5 s posts what the lens showed. A Deepgram drop is retried twice with the unfinalized audio; after that the relay sends `error asr-interrupted` and posts nothing |
 | `{"t":"history","before":seq,"limit":n}` | Fetch older messages |
 | `{"t":"session.new"}` | Start a new Slack thread |
 | `{"t":"ping"}` | Keep-alive. **Clients must send it about every 25 s.** In the 2026-11-25 e2e, a socket with no traffic was dropped (1006) after 270 s, and Cloudflare recorded it as a client-side disconnect |
@@ -183,7 +185,7 @@ Each route fails closed when its secret is missing:
 | `posted` | The message reached Slack: `seq`, `text`, `cid` if one was given, `dup: true` for a re-ack |
 | `kid-webhook` | `seq`, `result` = `ok` / `skipped` / `failed`, and `status`. Sent after each `posted` |
 | `history` | A page of older messages |
-| `error` | `code`, `message`, and `cid` when the error belongs to a turn (`asr-interrupted`, `asr-empty`, `asr-connect-failed`, Slack post failures) |
+| `error` | `code`, `message`, and `cid` when the error belongs to a turn (`asr-interrupted`, `asr-empty`, `asr-connect-failed`, `asr-rejected` for Deepgram HTTP 401/402/403, `asr-no-audio` after 10 s without frames, Slack post failures) |
 | `pong` | Reply to `ping` |
 
 **Resend without double posting.** The plugin keeps every `say` it has not seen acknowledged in a persisted outbox. After each reconnect, and after a page reload, it sends them again with the same `cid`.
@@ -198,7 +200,7 @@ Each route fails closed when its secret is missing:
 - Not covered: a voice turn whose transcript Slack rejects is not retried, because its text is not kept on the device. Reconcile reads one page (200 messages) of the thread or DM.
 - A duplicate is answered from history and never calls Slack or the Kid webhook.
 - `msg` / `history` items for glasses turns carry their `cid`, so a replay clears the outbox as well.
-- A voice turn cannot be resent: the audio is not kept. If the socket drops mid-turn, the relay reports `asr-interrupted` and posts nothing.
+- A voice turn cannot be resent from the device: the audio is kept only on the relay, for at most 15 s of not-yet-finalized speech, to survive a Deepgram drop. If the device socket drops mid-turn, the turn is cancelled.
 
 **Sessions and threads.** The first post of a session starts a new Slack thread. Later posts reply in that thread. A session ends after 30 min idle, or on `session.new`.
 
@@ -288,6 +290,5 @@ Each finding has a regression test in `test/`. The round-2 fixes were verified b
 These are unverified or not built yet:
 
 - **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. Fox is excluded three ways: the installing user from `authorizations` (router), the token owner from `auth.test` (hub), and any text starting with `〔眼镜〕`.
-- **Deepgram auth header.** It is not verified that an `Authorization` header passes through a Worker's outbound `fetch` WebSocket upgrade. The Cloudflare docs only show `Upgrade`. If it does not, Deepgram also accepts the key as a WebSocket subprotocol.
-- **ASR limits.** There is no limit on turn length and no `KeepAlive`. Deepgram closes a stream after about 10 s without audio. The device is expected to send `audio.stop` on release.
+- **ASR limits.** The relay stops a turn after 62 s of audio (the plugin stops at 60 s). Retry, timeouts and the chosen Deepgram config are in [`docs/M2-PLAN.md`](../docs/M2-PLAN.md). The Deepgram `Authorization` header through the outbound upgrade is confirmed by M1's device test.
 - **Plugin client.** The M1 plugin client (device-side WebSocket, entering `DEVICE_TOKEN` on the phone, paging replies with `LENS_TEXT`) is not written yet.

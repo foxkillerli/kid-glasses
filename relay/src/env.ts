@@ -10,6 +10,7 @@ export interface Env {
   FAST_LLM_KEY?: string
   DEEPGRAM_MODEL?: string
   DEEPGRAM_LANGUAGE?: string
+  DEEPGRAM_LANGUAGE_HINTS?: string
   FAST_LANE_ENABLED?: string
   KID_BOT_ID?: string
   KID_BOT_USER_ID?: string

@@ -1,4 +1,5 @@
-import { CLOSE_STREAM, TranscriptAssembler, parseDeepgramMessage } from './deepgram'
+import { AsrTurn, realTimers, type AsrConnector, type AsrLimits, type AsrSocket, type Timers } from './asr-turn'
+import type { AsrLang } from './deepgram'
 import { checkDeviceToken, isAuthedAttachment, type SocketAttachment } from './device-auth'
 import type { FastLane } from './fast-lane'
 import type { KidWebhook } from './kid-webhook'
@@ -17,11 +18,7 @@ export interface DeviceSocket {
   deserializeAttachment(): unknown
 }
 
-export interface AsrSocket {
-  send(data: string | ArrayBuffer | ArrayBufferView): void
-  close(code?: number, reason?: string): void
-  addEventListener(type: 'message' | 'close' | 'error', listener: (ev: { data?: unknown; code?: number }) => void): void
-}
+export type { AsrSocket, Timers }
 
 export interface HubDeps {
   storage: KvStorage
@@ -32,7 +29,9 @@ export interface HubDeps {
     selfUserId(): Promise<string | null>
     findOwnPost?(text: string, threadTs: string | null, sinceMs: number, excludeTs?: Set<string>): Promise<PostResult | null>
   }
-  asr: { connect(): Promise<AsrSocket> } | null
+  asr: AsrConnector | null
+  timers?: Timers
+  asrLimits?: Partial<AsrLimits>
   fastLane: FastLane
   kidWebhook?: KidWebhook | null
   pairing?: Pairing | null
@@ -61,16 +60,10 @@ export const PENDING_AUDIO_CAP = 100
 export const CLOSE_UNAUTHORIZED = 4401
 export const CLOSE_NOT_CONFIGURED = 4503
 
-interface AsrTurn {
-  socket: AsrSocket | null
-  assembler: TranscriptAssembler
-  pending: Array<ArrayBuffer | ArrayBufferView>
-  stopRequested: boolean
-  finished: boolean
+interface VoiceTurn {
+  asr: AsrTurn
   cid: string | undefined
-  owner: DeviceSocket | null
-  cancelled?: boolean
-  resolve: (text: string | null) => void
+  owner: DeviceSocket
 }
 
 interface CidEntry {
@@ -97,7 +90,7 @@ export function isAuthed(ws: DeviceSocket): boolean {
 
 export class HubCore {
   readonly history: HistoryStore
-  private turn: AsrTurn | null = null
+  private turn: VoiceTurn | null = null
   private queue: Promise<unknown> = Promise.resolve()
   private kidQueue: Promise<unknown> = Promise.resolve()
   private readonly kidSendersLogged = new Set<string>()
@@ -175,7 +168,7 @@ export class HubCore {
       return
     }
     if (typeof data !== 'string') {
-      if (!this.turn || this.turn.owner === null || this.turn.owner === ws) this.onAudioFrame(data)
+      if (!this.turn || this.turn.owner === ws) this.onAudioFrame(data)
       return
     }
     const parsed = parseClientMessage(data)
@@ -205,14 +198,14 @@ export class HubCore {
         await this.sayFromGlasses(m.text, m.cid)
         return
       case 'audio.start':
-        await this.startAsr(ws, m.cid)
+        await this.startAsr(ws, m.cid, m.lang)
         return
       case 'audio.stop':
-        if (this.turn && this.turn.owner !== null && this.turn.owner !== ws) return
+        if (this.turn && this.turn.owner !== ws) return
         this.stopAsr('device')
         return
       case 'audio.cancel':
-        if (this.turn && this.turn.owner !== null && this.turn.owner !== ws) return
+        if (this.turn && this.turn.owner !== ws) return
         this.cancelAsr('device')
         return
       case 'history': {
@@ -494,11 +487,12 @@ export class HubCore {
   }
 
   get recording(): boolean {
-    return !!this.turn && !this.turn.finished && !this.turn.stopRequested
+    return !!this.turn && !this.turn.asr.finished && !this.turn.asr.stopping
   }
 
-  async startAsr(ws: DeviceSocket, cid?: string): Promise<void> {
-    if (!this.deps.asr) {
+  async startAsr(ws: DeviceSocket, cid?: string, lang: AsrLang = 'auto'): Promise<void> {
+    const connector = this.deps.asr
+    if (!connector) {
       this.send(ws, { t: 'error', code: 'asr-not-configured', message: 'DEEPGRAM_API_KEY is not set' })
       return
     }
@@ -508,97 +502,53 @@ export class HubCore {
     }
     let resolve: (text: string | null) => void = () => {}
     const result = new Promise<string | null>(r => (resolve = r))
-    const turn: AsrTurn = { socket: null, assembler: new TranscriptAssembler(), pending: [], stopRequested: false, finished: false, cid, owner: ws, resolve }
-    this.turn = turn
+    const withCid = cid ? { cid } : {}
+    const entry = { cid, owner: ws } as VoiceTurn
+    entry.asr = new AsrTurn({
+      connector,
+      lang,
+      timers: this.deps.timers ?? realTimers,
+      now: this.deps.now,
+      limits: this.deps.asrLimits,
+      log: m => this.log(m),
+      onPartial: text => this.broadcast({ t: 'asr.partial', text }),
+      onDone: o => {
+        if (this.turn === entry) this.turn = null
+        if (!o.ok) {
+          if (o.code) this.broadcast({ t: 'error', code: o.code, message: o.message, ...withCid })
+          resolve(null)
+          return
+        }
+        this.broadcast({ t: 'asr.final', text: o.text })
+        if (!o.text) this.broadcast({ t: 'error', code: 'asr-empty', message: 'no speech recognised; nothing was sent', ...withCid })
+        resolve(o.text || null)
+      },
+    })
+    this.turn = entry
     this.turnChain = this.turnChain.then(() => result).then(text => (text ? this.sayFromGlasses(text, cid) : null)).catch(() => null)
-    let socket: AsrSocket
-    try {
-      socket = await this.deps.asr.connect()
-    } catch (err) {
-      turn.finished = true
-      if (this.turn === turn) this.turn = null
-      turn.resolve(null)
-      const message = err instanceof Error && /^deepgram upgrade failed: http \d{3}$/.test(err.message) ? err.message : 'could not reach the transcription service'
-      this.log(`asr connect failed ${errorName(err)}`)
-      this.broadcast({ t: 'error', code: 'asr-connect-failed', message, ...(cid ? { cid } : {}) })
-      return
-    }
-    turn.socket = socket
-    socket.addEventListener('message', ev => {
-      if (typeof ev.data !== 'string' || turn.finished) return
-      const r = parseDeepgramMessage(ev.data)
-      if (!r) return
-      const { partial } = turn.assembler.feed(r)
-      if (partial) this.broadcast({ t: 'asr.partial', text: partial })
-    })
-    socket.addEventListener('close', ev => {
-      this.finishAsr(turn, turn.stopRequested && ev.code === 1000)
-    })
-    socket.addEventListener('error', () => {
-      this.finishAsr(turn, false)
-    })
-    for (const frame of turn.pending) socket.send(frame)
-    turn.pending = []
-    if (turn.stopRequested) socket.send(CLOSE_STREAM)
+    this.log(`asr start lang=${lang}`)
+    await entry.asr.start()
   }
 
   onAudioFrame(frame: ArrayBuffer | ArrayBufferView): void {
-    const t = this.turn
-    if (!t || t.finished || t.stopRequested) return
-    if (t.socket) t.socket.send(frame)
-    else if (t.pending.length < PENDING_AUDIO_CAP) t.pending.push(frame)
+    this.turn?.asr.push(frame)
   }
 
   cancelAsr(reason: string): void {
     const t = this.turn
-    if (!t || t.finished || t.stopRequested) return
-    t.cancelled = true
-    t.stopRequested = true
-    this.log(`asr cancel (${reason})`)
-    this.finishAsr(t, false)
-    try {
-      t.socket?.close(1000, 'cancelled')
-    } catch {
-      return
-    }
+    if (!t || t.asr.finished || t.asr.stopping) return
+    t.asr.cancel(reason)
   }
 
   stopAsr(reason: string): void {
-    const t = this.turn
-    if (!t || t.finished || t.stopRequested) return
-    t.stopRequested = true
-    this.log(`asr stop (${reason})`)
-    if (t.socket) {
-      try {
-        t.socket.send(CLOSE_STREAM)
-      } catch {
-        this.finishAsr(t, false)
-      }
-    }
+    this.turn?.asr.stop(reason)
+  }
+
+  onDeviceGone(ws: DeviceSocket): void {
+    if (this.turn && this.turn.owner === ws) this.cancelAsr('owner-gone')
   }
 
   get turnsSettled(): Promise<unknown> {
     return this.turnChain
-  }
-
-  private finishAsr(t: AsrTurn, completed: boolean): void {
-    if (t.finished) return
-    t.finished = true
-    if (this.turn === t) this.turn = null
-    const text = t.assembler.finalText()
-    if (t.cancelled) {
-      t.resolve(null)
-      return
-    }
-    if (!completed) {
-      this.log('asr interrupted')
-      this.broadcast({ t: 'error', code: 'asr-interrupted', message: 'transcription ended early; nothing was sent', ...(t.cid ? { cid: t.cid } : {}) })
-      t.resolve(null)
-      return
-    }
-    this.log(`asr final len=${text.length}`)
-    this.broadcast({ t: 'asr.final', text })
-    if (!text) this.broadcast({ t: 'error', code: 'asr-empty', message: 'no speech recognised; nothing was sent', ...(t.cid ? { cid: t.cid } : {}) })
-    t.resolve(text || null)
   }
 }

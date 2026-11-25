@@ -1,3 +1,5 @@
+import { ASR_LANGS, type AsrLang } from './deepgram'
+
 export const MAX_SAY_CHARS = 2000
 export const CID_RE = /^[A-Za-z0-9_-]{8,64}$/
 
@@ -8,7 +10,7 @@ export type ClientMessage =
   | { t: 'hello'; lastSeq?: number }
   | { t: 'ping' }
   | { t: 'say'; text: string; cid?: string }
-  | { t: 'audio.start'; cid?: string }
+  | { t: 'audio.start'; cid?: string; lang?: AsrLang }
   | { t: 'audio.stop' }
   | { t: 'audio.cancel' }
   | { t: 'history'; before?: number; limit?: number }
@@ -59,7 +61,8 @@ export function parseClientMessage(data: string): Parsed {
         : { ok: false, error: 'bad-lastSeq' }
     case 'audio.start':
       if (o.cid !== undefined && (typeof o.cid !== 'string' || !CID_RE.test(o.cid))) return { ok: false, error: 'bad-cid' }
-      return { ok: true, msg: o.cid ? { t: 'audio.start', cid: o.cid as string } : { t: 'audio.start' } }
+      if (o.lang !== undefined && !ASR_LANGS.includes(o.lang as AsrLang)) return { ok: false, error: 'bad-lang' }
+      return { ok: true, msg: { t: 'audio.start', ...(o.cid ? { cid: o.cid as string } : {}), ...(o.lang ? { lang: o.lang as AsrLang } : {}) } }
     case 'ping':
     case 'audio.stop':
     case 'audio.cancel':

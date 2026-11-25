@@ -1,11 +1,11 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DISABLED_FAST_LANE, type FastLane } from '../src/fast-lane'
 import { HubCore, SESSION_IDLE_MS, type HubDeps } from '../src/hub-core'
-import { CLOSE_STREAM } from '../src/deepgram'
+import { FINALIZE } from '../src/deepgram'
 import { ChannelNotAllowedError } from '../src/slack-client'
 import type { KidMessage } from '../src/slack-events'
 import type { KidWebhook, KidWebhookPayload, KidWebhookResult } from '../src/kid-webhook'
-import { FakeAsr, FakeDevice, FakeStorage, flush } from './fakes'
+import { FakeAsr, FakeDevice, FakeStorage, flush, FakeTimers } from './fakes'
 
 function setup(over: Partial<HubDeps> = {}) {
   const device = new FakeDevice()
@@ -24,6 +24,7 @@ function setup(over: Partial<HubDeps> = {}) {
       }),
     },
     asr: { connect: async () => asr },
+    timers: new FakeTimers(),
     fastLane: DISABLED_FAST_LANE,
     now: () => now,
     ...over,
@@ -92,7 +93,7 @@ describe('HubCore', () => {
     asr.result('今天几点放学', true)
     expect(device.of('asr.partial').map(m => m.text)).toEqual(['今天', '今天几点放学'])
     await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
-    expect(asr.sent.at(-1)).toBe(CLOSE_STREAM)
+    expect(asr.sent.at(-1)).toBe(FINALIZE)
     await core.onDeviceMessage(device, new Uint8Array(10))
     expect(asr.sent).toHaveLength(2)
     asr.close()
@@ -110,7 +111,7 @@ describe('HubCore', () => {
     core.stopAsr('test')
     release()
     await started
-    expect(asr.sent).toEqual([new Uint8Array(4), CLOSE_STREAM])
+    expect(asr.sent).toEqual([new Uint8Array(4), FINALIZE])
   })
 
   it('reports a missing Deepgram key and rejects malformed device messages', async () => {
@@ -156,6 +157,7 @@ describe('HubCore ordering', () => {
         },
       },
       asr: null,
+      timers: new FakeTimers(),
       fastLane: DISABLED_FAST_LANE,
       now: () => 1,
     })
@@ -185,6 +187,7 @@ describe('HubCore review fixes', () => {
         },
       },
       asr: { connect: async () => asr },
+      timers: new FakeTimers(),
       fastLane: DISABLED_FAST_LANE,
       now: () => now,
       ...over,
@@ -292,7 +295,7 @@ describe('HubCore review fixes', () => {
 
   it('F5: an upstream failure is reported and the partial transcript is not posted', async () => {
     const d = new FakeDevice()
-    const { c, asr, posts } = core({}, [d])
+    const { c, asr, posts } = core({ asrLimits: { maxReconnects: 0 } }, [d])
     await c.onDeviceMessage(d, JSON.stringify({ t: 'audio.start' }))
     asr.result('半句', true)
     asr.emit('error', {})
@@ -300,7 +303,7 @@ describe('HubCore review fixes', () => {
     expect(posts).toEqual([])
     expect(d.of('error').map(m => m.code)).toEqual(['asr-interrupted'])
     const early = new FakeAsr()
-    const { c: c2, posts: posts2 } = core({ asr: { connect: async () => early } }, [d])
+    const { c: c2, posts: posts2 } = core({ asr: { connect: async () => early }, asrLimits: { maxReconnects: 0 } }, [d])
     await c2.onDeviceMessage(d, JSON.stringify({ t: 'audio.start' }))
     early.result('没说完', true)
     early.close(1011)
@@ -325,6 +328,7 @@ describe('HubCore review round 2', () => {
         },
       },
       asr: null,
+      timers: new FakeTimers(),
       fastLane: DISABLED_FAST_LANE,
       now: () => 1,
       ...over,
@@ -369,7 +373,7 @@ describe('HubCore review round 2', () => {
 
   it('F5: a close other than 1000 after audio.stop is reported and not posted', async () => {
     const asr = new FakeAsr()
-    const { c, device, posts } = core2({ asr: { connect: async () => asr } })
+    const { c, device, posts } = core2({ asr: { connect: async () => asr }, asrLimits: { maxReconnects: 0 } })
     await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.start' }))
     asr.result('一半', true)
     await c.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
@@ -412,6 +416,7 @@ describe('HubCore bot-DM model', () => {
         postToKid: async () => ({ ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }),
       },
       asr: null,
+      timers: new FakeTimers(),
       fastLane: DISABLED_FAST_LANE,
       now: () => now,
     })
@@ -488,6 +493,7 @@ describe('HubCore kid sender logging', () => {
       sockets: () => [],
       slack: { selfUserId: async () => 'UFOX0001', postToKid: async () => ({ ts: '1', channel: 'D0123ABCDEF' }) },
       asr: null,
+      timers: new FakeTimers(),
       fastLane: DISABLED_FAST_LANE,
       now: () => 1,
       log: m => logs.push(m),
@@ -509,6 +515,7 @@ describe('HubCore bot-DM review fixes', () => {
       sockets: () => [device],
       slack: { selfUserId, postToKid: async () => ({ ts: `1700000000.00${n++}`, channel: 'D0123ABCDEF' }) },
       asr: null,
+      timers: new FakeTimers(),
       fastLane: DISABLED_FAST_LANE,
       now: () => now,
     })
@@ -580,6 +587,7 @@ describe('HubCore Kid webhook', () => {
         },
       },
       asr: null,
+      timers: new FakeTimers(),
       fastLane: DISABLED_FAST_LANE,
       kidWebhook: hook,
       now: () => now,
