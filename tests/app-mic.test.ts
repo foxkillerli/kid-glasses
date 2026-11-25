@@ -51,6 +51,7 @@ describe('App mic path end to end (fake bridge, real SDK event parsing)', () => 
     send({ textEvent: { eventType: 2 } })
     send({ textEvent: { eventType: 2 } })
     send({ textEvent: { eventType: 2 } })
+    send({ textEvent: { eventType: 2 } })
     send({ sysEvent: {} })
     send({ sysEvent: { eventType: 9 } })
     await flush()

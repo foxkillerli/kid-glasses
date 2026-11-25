@@ -59,6 +59,7 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
         sockets.push(ws)
         return ws
       },
+      voiceTailMs: 30,
     })
     const body = () => (app as unknown as { bodyText(): string }).bodyText()
     await app.start()
@@ -92,6 +93,7 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     await settle()
     const start = ws.json().find(m => m.t === 'audio.start')
     expect(start?.cid).toBeTruthy()
+    expect(start?.lang).toBe('auto')
     send(audio({ audioPcm: [1, 0, 2, 0], source: 'glasses' }))
     send(audio({ audioPcm: [9, 9], source: 'phone' }))
     send(audio({ audioPcm: [8, 8], audioSource: 'phone' }))
@@ -101,6 +103,13 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     expect(body()).toContain('你说：今天几点')
     send({ sysEvent: { eventType: 10 } })
     await settle()
+    send(audio({ audioPcm: [5, 0] }))
+    expect(ws.json().some(m => m.t === 'audio.stop')).toBe(false)
+    expect(body()).toContain('你说：今天几点')
+    await new Promise(r => setTimeout(r, 60))
+    await settle()
+    expect(ws.json().some(m => m.t === 'audio.stop')).toBe(true)
+    send(audio({ audioPcm: [6, 0] }))
     ws.frame({ t: 'asr.final', text: '今天几点放学' })
     await settle()
     expect(body()).toContain('你说：今天几点放学')
@@ -112,6 +121,7 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     expect(binary.map(b => Array.from(b))).toEqual([
       [1, 0, 2, 0],
       [3, 0],
+      [5, 0],
     ])
     expect(ws.json().filter(m => String(m.t).startsWith('audio')).map(m => m.t)).toEqual(['audio.start', 'audio.stop'])
     expect(audioControl.mock.calls).toEqual([
@@ -119,5 +129,70 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
       [false, 'glasses'],
     ])
     expect(fetchCalls.every(u => u.startsWith('https://kid-glasses-relay.your-subdomain.workers.dev/pair/'))).toBe(true)
+  })
+
+  it('the menu language toggle is saved, shown and sent with audio.start; after release the hint says 正在转写', async () => {
+    const { App } = await import('../src/app')
+    const bridge = {
+      audioControl: vi.fn(async () => true),
+      createStartUpPageContainer: vi.fn(async () => 0),
+      rebuildPageContainer: vi.fn(async () => true),
+      textContainerUpgrade: vi.fn(async () => true),
+      shutDownPageContainer: vi.fn(async () => true),
+      onEvenHubEvent: vi.fn(),
+      onLaunchSource: vi.fn(),
+      onDeviceStatusChanged: vi.fn(),
+      getDeviceInfo: vi.fn(async () => null),
+    } as unknown as EvenAppBridge
+    const store = new MemoryStore()
+    store.map.set(STORE_KEYS.token, 'kgd_saved')
+    store.map.set(STORE_KEYS.asrLang, 'en')
+    const sockets: FakeWs[] = []
+    const app = new App(bridge, { render() {} }, null, {
+      store,
+      fetch: vi.fn(async () => Response.json({})),
+      ws: (url, protocols) => {
+        const ws = new FakeWs(url, protocols)
+        sockets.push(ws)
+        return ws
+      },
+      voiceTailMs: 0,
+    })
+    const a = app as unknown as { bodyText(): string; statusLine(): string; hintText(): string; onEvent(e: unknown): void }
+    await app.start()
+    await settle()
+    const ws = sockets[0]
+    ws.open()
+    ws.frame({ t: 'auth.ok' })
+    await settle()
+    expect(a.statusLine()).toContain('EN')
+    expect(a.bodyText()).toContain('识别语言：English')
+    a.onEvent({ sysEvent: { eventType: 3 } })
+    a.onEvent({ textEvent: { eventType: 2 } })
+    expect(a.bodyText()).toContain('> 2. 语言：English')
+    a.onEvent({ sysEvent: { eventType: 0 } })
+    a.onEvent({ sysEvent: { eventType: 0 } })
+    await settle()
+    expect(a.bodyText()).toContain('语言：中文')
+    expect(store.map.get(STORE_KEYS.asrLang)).toBe('zh')
+    a.onEvent({ textEvent: { eventType: 1 } })
+    a.onEvent({ sysEvent: { eventType: 0 } })
+    expect(a.statusLine()).toContain('中文')
+    a.onEvent({ sysEvent: { eventType: 9 } })
+    await settle()
+    const start = ws.json().find(m => m.t === 'audio.start')
+    expect(start?.lang).toBe('zh')
+    expect(a.hintText()).toContain('正在听')
+    ws.frame({ t: 'error', code: 'asr-no-audio', message: 'x', cid: start?.cid })
+    await settle()
+    expect(a.hintText()).toContain('眼镜的声音断了')
+    a.onEvent({ sysEvent: { eventType: 9 } })
+    await settle()
+    expect(a.hintText()).toContain('正在听')
+    a.onEvent(evenHubEventFromJson({ type: 'audioEvent', jsonData: { audioPcm: [1, 0] } }))
+    a.onEvent({ sysEvent: { eventType: 10 } })
+    await settle()
+    expect(ws.json().filter(m => m.t === 'audio.stop')).toHaveLength(1)
+    expect(a.hintText()).toContain('… 正在转写')
   })
 })

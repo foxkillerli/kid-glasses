@@ -22,4 +22,5 @@ export const STORE_KEYS = {
   lastSeq: 'kg.relay.lastSeq',
   outbox: 'kg.relay.outbox',
   pairing: 'kg.relay.pairing',
+  asrLang: 'kg.asr.lang',
 } as const

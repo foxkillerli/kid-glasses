@@ -164,6 +164,8 @@ The plugin opens on the **Kid** page.
 
 - Audio comes from the G2 glasses mic only, through the same `checkFrameSource` gate as M0.
 - It streams to the relay (Deepgram); the transcript is posted to Slack as `〔眼镜〕…` and Kid's webhook is called.
+- The live transcript shows as `你说：…` while you talk. After release the plugin keeps forwarding frames for the mic close plus 250 ms, then sends `audio.stop`, so the last words are not cut off.
+- **Language** (M2): the menu's second item cycles `自动（中英）` → `中文` → `English`. The choice is stored on the phone and sent with every `audio.start`. Config and limits: [`docs/M2-PLAN.md`](docs/M2-PLAN.md); device test: [`docs/M2-DEVICE-TEST.md`](docs/M2-DEVICE-TEST.md).
 - Kid's replies appear on the lens, paginated with `LENS_TEXT`.
 
 **Paging** (`src/lib/conversation.ts`). Pages flip when they fill, never on a timer.

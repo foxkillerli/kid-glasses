@@ -23,7 +23,8 @@ import { RelayClient, newCid, type RelayState, type WsFactory, type WsLike } fro
 import { PairingClient } from './lib/pairing-client'
 import { Conversation, oneLine } from './lib/conversation'
 import { BridgeStore, type AsyncStore } from './lib/store'
-import { RELAY_ORIGIN, RELAY_TIMING, RELAY_WS_URL } from './lib/relay-config'
+import { ASR_LANG_LABEL, ASR_LANG_SHORT, nextAsrLang, parseAsrLang, type AsrLang } from './lib/asr-lang'
+import { RELAY_ORIGIN, RELAY_TIMING, RELAY_WS_URL, STORE_KEYS } from './lib/relay-config'
 import {
   COMMON_HANZI,
   PUNCT_SAMPLES,
@@ -114,8 +115,9 @@ type Screen =
   | { kind: 'mic' }
   | { kind: 'bg' }
 
-const MENU: Array<{ label: string; open: () => Screen }> = [
+const MENU: Array<{ label: string; open?: () => Screen; action?: 'lang' }> = [
   { label: 'Kid (M1)', open: () => ({ kind: 'kid' }) },
+  { label: '语言', action: 'lang' },
   { label: 'Glyph test (CJK)', open: () => ({ kind: 'glyph', page: 0 }) },
   { label: 'Page capacity', open: () => ({ kind: 'cap', page: 0 }) },
   { label: 'Mic capture', open: () => ({ kind: 'mic' }) },
@@ -172,9 +174,11 @@ export interface AppOptions {
   ws?: WsFactory
   fetch?: (url: string, init: RequestInit) => Promise<Response>
   store?: AsyncStore
+  voiceTailMs?: number
 }
 
 const VOICE_MAX_MS = 60_000
+const VOICE_TAIL_MS = 250
 const FLASH_MS = 12_000
 
 const ERROR_TEXT: Record<string, string> = {
@@ -189,6 +193,8 @@ const ERROR_TEXT: Record<string, string> = {
   ChannelNotAllowedError: 'relay 的频道配置有问题',
   'empty-text': '内容是空的，没发',
   'asr-busy': '另一副眼镜正在说话',
+  'asr-rejected': '转写服务拒绝了（密钥或额度），这句没发出去',
+  'asr-no-audio': '眼镜的声音断了，这句没发出去',
 }
 
 const STATE_TEXT: Record<RelayState, string> = {
@@ -208,6 +214,7 @@ interface VoiceState {
   dropped: number
   partial: string
   lastLongEndAt: number
+  tailing: boolean
 }
 
 export class App {
@@ -221,7 +228,10 @@ export class App {
   private liveCid: string | null = null
   private relayDetail = ''
   private flash: { text: string; until: number } | null = null
-  private readonly voice: VoiceState = { active: false, mode: 'tap', cid: null, startedAt: 0, frames: 0, dropped: 0, partial: '', lastLongEndAt: 0 }
+  private readonly voice: VoiceState = { active: false, mode: 'tap', cid: null, startedAt: 0, frames: 0, dropped: 0, partial: '', lastLongEndAt: 0, tailing: false }
+  private asrLang: AsrLang = 'auto'
+  private readonly store: AsyncStore
+  private readonly voiceTailMs: number
   private readonly glyphs = glyphPages()
   private readonly caps: CapacityPage[] = capacityPages(FULL_GEOMETRY)
   private hb: HeartbeatState
@@ -273,6 +283,8 @@ export class App {
       if (this.pendingKey === key) this.pendingKey = ''
     }
     const store = opts.store ?? new BridgeStore(this.bridge as unknown as Partial<import('./lib/store').BridgeStorage>, storage)
+    this.store = store
+    this.voiceTailMs = opts.voiceTailMs ?? VOICE_TAIL_MS
     const timers = {
       setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
       clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
@@ -379,6 +391,7 @@ export class App {
     setInterval(() => this.onHeartbeat(), HEARTBEAT_MS)
     setInterval(() => this.onMicRefresh(), 250)
     this.ws.start()
+    this.asrLang = parseAsrLang(await this.store.get(STORE_KEYS.asrLang).catch(() => null))
     await this.relay.init()
     this.relay.start()
   }
@@ -388,6 +401,11 @@ export class App {
     this.note(`relay ${st}${detail ? ` (${detail})` : ''}`)
     if (st !== 'online' && this.voice.active) {
       void this.stopVoice('offline', false)
+      this.showFlash('连接断了，这句没发出去')
+    }
+    if (st !== 'online' && this.voice.tailing) {
+      this.voice.tailing = false
+      this.clearLive()
       this.showFlash('连接断了，这句没发出去')
     }
     if (st === 'need-pair') void this.pairing.begin()
@@ -522,6 +540,7 @@ export class App {
     }
     const pending = this.relay.pending.length
     if (pending) parts.push(`待发${pending}`)
+    if (ASR_LANG_SHORT[this.asrLang]) parts.push(ASR_LANG_SHORT[this.asrLang])
     if (this.voice.active) parts.push(`● 录音 ${Math.floor((Date.now() - this.voice.startedAt) / 1000)}s`)
     parts.push(hhmm(Date.now()))
     return parts.join(' · ')
@@ -530,7 +549,7 @@ export class App {
   private kidBody(): string {
     if (this.relay.state === 'need-pair') return this.pairBody()
     const v = this.conv.view()
-    if (!v.pages) return ['按住说话，松开就发给 Kid。', 'Kid 的回复会显示在这里。', '', '上下滑动翻页，双击回菜单。'].join('\n')
+    if (!v.pages) return ['按住说话，松开就发给 Kid。', 'Kid 的回复会显示在这里。', '', '上下滑动翻页，双击回菜单。', `识别语言：${ASR_LANG_LABEL[this.asrLang]}（菜单里切换）`].join('\n')
     return v.body
   }
 
@@ -565,7 +584,9 @@ export class App {
     if (this.flash && this.flash.until > now) return oneLine(`!! ${this.flash.text}`)
     if (this.relay.state === 'need-pair') return '单击：重新获取  双击：菜单'
     const v = this.conv.view()
-    return `按住说话 滑动翻页 双击菜单${v.pages > 1 ? ` ${v.page}/${v.pages}` : ''}`
+    const page = v.pages > 1 ? ` ${v.page}/${v.pages}` : ''
+    if (this.liveCid) return `… 正在转写${page}`
+    return `按住说话 滑动翻页 双击菜单${page}`
   }
 
   private layoutKey(): string {
@@ -637,7 +658,7 @@ export class App {
       case 'menu':
         return [
           'Kid Glasses · 菜单（M0 测试页在下面）',
-          ...MENU.map((m, i) => `${i === s.cursor ? '>' : ' '} ${i + 1}. ${m.label}`),
+          ...MENU.map((m, i) => `${i === s.cursor ? '>' : ' '} ${i + 1}. ${m.action === 'lang' ? `语言：${ASR_LANG_LABEL[this.asrLang]}（单击切换）` : m.label}`),
           `boot #${this.bootInfo.boot}  last: ${this.lastGesture}`,
         ].join('\n')
       case 'glyph':
@@ -747,7 +768,10 @@ export class App {
       }
     }
     if (this.screen.kind === 'mic' && m.recording) this.refresh()
-    if (this.voice.active && Date.now() - this.voice.startedAt > VOICE_MAX_MS) void this.stopVoice('max-length', true)
+    if (this.voice.active && Date.now() - this.voice.startedAt > VOICE_MAX_MS) {
+      void this.stopVoice('max-length', true)
+      this.showFlash('说满 60 秒，已自动发送')
+    }
     if (this.voice.active && this.screen.kind === 'kid') this.refresh()
     if (this.conv.revealing && this.conv.tick() && this.screen.kind === 'kid') this.refresh()
   }
@@ -785,7 +809,7 @@ export class App {
     const m = this.mic
     const pcm = a.audioPcm
     if (!pcm) return
-    if (this.voice.active) {
+    if (this.voice.active || this.voice.tailing) {
       const verdict = checkFrameSource(a.source, raw)
       if (!verdict.accept) {
         this.voice.dropped++
@@ -793,8 +817,10 @@ export class App {
         return
       }
       if (!this.relay.audioFrame(pcm)) {
-        void this.stopVoice('send-failed', false)
-        this.showFlash('连接断了，这句没发出去')
+        if (this.voice.active) {
+          void this.stopVoice('send-failed', false)
+          this.showFlash('连接断了，这句没发出去')
+        }
         return
       }
       this.voice.frames++
@@ -855,7 +881,7 @@ export class App {
       }
       if (s.kind === 'mic' && this.mic.recording) void this.stopRecording('leave')
       if (s.kind === 'kid' && this.voice.active) void this.stopVoice('leave', false)
-      this.screen = { kind: 'menu', cursor: MENU.findIndex(m => m.open().kind === s.kind) }
+      this.screen = { kind: 'menu', cursor: Math.max(0, MENU.findIndex(m => m.open?.().kind === s.kind)) }
       this.render()
       return
     }
@@ -866,7 +892,11 @@ export class App {
       case 'menu':
         if (g === 'down') s.cursor = (s.cursor + 1) % MENU.length
         else if (g === 'up') s.cursor = (s.cursor + MENU.length - 1) % MENU.length
-        else if (g === 'click') this.screen = MENU[s.cursor].open()
+        else if (g === 'click') {
+          const item = MENU[s.cursor]
+          if (item.action === 'lang') this.cycleAsrLang()
+          else if (item.open) this.screen = item.open()
+        }
         break
       case 'glyph':
         if (g === 'down') s.page = (s.page + 1) % this.glyphs.length
@@ -930,19 +960,26 @@ export class App {
     }
   }
 
+  private cycleAsrLang(): void {
+    this.asrLang = nextAsrLang(this.asrLang)
+    this.note(`asr lang ${this.asrLang}`)
+    void this.store.set(STORE_KEYS.asrLang, this.asrLang).catch(() => this.note('asr lang save failed'))
+  }
+
   private async startVoice(mode: 'long' | 'tap'): Promise<void> {
     const v = this.voice
-    if (v.active || this.mic.recording) return
+    if (v.active || v.tailing || this.mic.recording) return
     if (this.relay.state !== 'online') {
       this.showFlash(`现在${STATE_TEXT[this.relay.state]}，不能说话`)
       return
     }
-    const cid = this.relay.audioStart()
+    const cid = this.relay.audioStart(this.asrLang)
     if (!cid) {
       this.showFlash('连不上 relay，不能说话')
       return
     }
     Object.assign(v, { active: true, mode, cid, startedAt: Date.now(), frames: 0, dropped: 0, partial: '' })
+    this.flash = null
     this.conv.skipReveal()
     this.conv.setLive(null)
     this.liveCid = cid
@@ -964,7 +1001,8 @@ export class App {
     const v = this.voice
     if (!v.active) return
     v.active = false
-    if (userEnded) this.relay.audioStop()
+    const cid = v.cid
+    if (userEnded) v.tailing = true
     else {
       this.relay.audioCancel()
       this.clearLive()
@@ -974,6 +1012,12 @@ export class App {
       r = await closeGlassesMic(this.bridge)
     } catch (err) {
       r = `throw ${String(err).slice(0, 40)}`
+    }
+    if (userEnded) {
+      if (this.voiceTailMs > 0) await new Promise(res => setTimeout(res, this.voiceTailMs))
+      if (!v.tailing || v.cid !== cid) return
+      v.tailing = false
+      this.relay.audioStop()
     }
     this.note(`voice stop ${reason} frames=${v.frames} dropped=${v.dropped} ${((Date.now() - v.startedAt) / 1000).toFixed(1)}s audioControl -> ${String(r)}`)
     if (userEnded && v.frames === 0) {

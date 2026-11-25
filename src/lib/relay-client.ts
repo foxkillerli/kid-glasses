@@ -464,10 +464,10 @@ export class RelayClient {
     return entry.cid
   }
 
-  audioStart(): string | null {
+  audioStart(lang?: string): string | null {
     if (this.stateValue !== 'online') return null
     const cid = this.deps.uuid()
-    return this.sendJson({ t: 'audio.start', cid }) ? cid : null
+    return this.sendJson({ t: 'audio.start', cid, ...(lang ? { lang } : {}) }) ? cid : null
   }
 
   audioFrame(pcm: Uint8Array): boolean {
