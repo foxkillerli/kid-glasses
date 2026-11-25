@@ -181,7 +181,7 @@ Each route fails closed when its secret is missing:
 | `hello` | Greeting, with `lastSeq` |
 | `replay.done` | `{upTo}`: the replay after `hello {lastSeq}` is complete. The plugin persists its cursor only after this frame, so live frames that arrive during the replay cannot make it skip a gap |
 | `msg` | A message: `from` = `kid` / `glasses` / `fast`, plus `session`, and `edited` on edits |
-| `asr.partial` / `asr.final` | Live and final transcript |
+| `asr.partial` / `asr.final` | Live and final transcript, with the turn's `cid`. The plugin ignores transcripts of any other turn |
 | `posted` | The message reached Slack: `seq`, `text`, `cid` if one was given, `dup: true` for a re-ack |
 | `kid-webhook` | `seq`, `result` = `ok` / `skipped` / `failed`, and `status`. Sent after each `posted` |
 | `history` | A page of older messages |

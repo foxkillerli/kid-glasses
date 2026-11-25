@@ -176,11 +176,13 @@ export interface AppOptions {
   store?: AsyncStore
   voiceTailMs?: number
   micCloseWaitMs?: number
+  liveWaitMs?: number
 }
 
 const VOICE_MAX_MS = 60_000
 const VOICE_TAIL_MS = 250
 const MIC_CLOSE_WAIT_MS = 1_000
+const LIVE_WAIT_MS = 15_000
 const FLASH_MS = 12_000
 
 const ERROR_TEXT: Record<string, string> = {
@@ -235,6 +237,9 @@ export class App {
   private readonly store: AsyncStore
   private readonly voiceTailMs: number
   private readonly micCloseWaitMs: number
+  private readonly liveWaitLimitMs: number
+  private liveWaitedMs = 0
+  private lastLiveTick = 0
   private readonly glyphs = glyphPages()
   private readonly caps: CapacityPage[] = capacityPages(FULL_GEOMETRY)
   private hb: HeartbeatState
@@ -289,6 +294,7 @@ export class App {
     this.store = store
     this.voiceTailMs = opts.voiceTailMs ?? VOICE_TAIL_MS
     this.micCloseWaitMs = opts.micCloseWaitMs ?? MIC_CLOSE_WAIT_MS
+    this.liveWaitLimitMs = opts.liveWaitMs ?? LIVE_WAIT_MS
     const timers = {
       setTimeout: (fn: () => void, ms: number) => setTimeout(fn, ms),
       clearTimeout: (id: unknown) => clearTimeout(id as ReturnType<typeof setTimeout>),
@@ -779,6 +785,21 @@ export class App {
     }
     if (this.voice.active && this.screen.kind === 'kid') this.refresh()
     if (this.conv.revealing && this.conv.tick() && this.screen.kind === 'kid') this.refresh()
+    this.checkLiveWait()
+  }
+
+  private checkLiveWait(): void {
+    const now = Date.now()
+    const waiting = !!this.liveCid && !this.voice.active && !this.voice.tailing
+    if (!waiting) this.liveWaitedMs = 0
+    else if (this.relay.state === 'online' && this.lastLiveTick) this.liveWaitedMs += now - this.lastLiveTick
+    this.lastLiveTick = now
+    if (waiting && this.liveWaitedMs > this.liveWaitLimitMs) {
+      this.note('live transcript wait expired')
+      this.liveWaitedMs = 0
+      this.clearLive()
+      this.showFlash('转写超时，这句可能没发出去，请看 Slack')
+    }
   }
 
   private clearLive(): void {

@@ -64,6 +64,7 @@ Plugin (`src/app.ts`, `src/lib/relay-client.ts`):
 2. **Tail frames.** After you release, frames keep going to the relay until the mic close returns plus 250 ms, then `audio.stop`.
 3. **Lens.** Live `你说：…` while talking (fill-triggered paging from M1), hint `… 正在转写` after release until the line becomes `我：…`. The error flash is cleared when you start talking again. At 60 s the lens says `说满 60 秒，已自动发送`.
 4. **New error texts:** `asr-rejected`, `asr-no-audio`.
+5. **No stuck lens.** After release the plugin waits for the `我：…` line for at most 15 s of online time. If the turn never comes back (for example it died while the phone was offline), the live line is cleared and the lens says `转写超时，这句可能没发出去，请看 Slack`.
 
 ## Limits
 

@@ -248,4 +248,63 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     await settle()
     expect(a.bodyText()).toContain('你说：这是我的')
   })
+
+  it.each([
+    ['online', false],
+    ['offline', true],
+  ])('the post-release wait has an online-only deadline (%s)', async (_label, offline) => {
+    const { App } = await import('../src/app')
+    const bridge = {
+      audioControl: vi.fn(async () => true),
+      createStartUpPageContainer: vi.fn(async () => 0),
+      rebuildPageContainer: vi.fn(async () => true),
+      textContainerUpgrade: vi.fn(async () => true),
+      shutDownPageContainer: vi.fn(async () => true),
+      onEvenHubEvent: vi.fn(),
+      onLaunchSource: vi.fn(),
+      onDeviceStatusChanged: vi.fn(),
+      getDeviceInfo: vi.fn(async () => null),
+    } as unknown as EvenAppBridge
+    const store = new MemoryStore()
+    store.map.set(STORE_KEYS.token, 'kgd_saved')
+    const sockets: FakeWs[] = []
+    const app = new App(bridge, { render() {} }, null, {
+      store,
+      fetch: vi.fn(async () => Response.json({})),
+      ws: (url, protocols) => {
+        const ws = new FakeWs(url, protocols)
+        sockets.push(ws)
+        return ws
+      },
+      voiceTailMs: 0,
+      liveWaitMs: 20,
+    })
+    const a = app as unknown as { bodyText(): string; hintText(): string; onEvent(e: unknown): void; checkLiveWait(): void }
+    await app.start()
+    await settle()
+    const ws = sockets[0]
+    ws.open()
+    ws.frame({ t: 'auth.ok' })
+    a.onEvent({ sysEvent: { eventType: 9 } })
+    await settle()
+    const start = ws.json().find(m => m.t === 'audio.start')
+    ws.frame({ t: 'asr.partial', text: '等不到', cid: start?.cid })
+    a.onEvent(evenHubEventFromJson({ type: 'audioEvent', jsonData: { audioPcm: [1, 0] } }))
+    a.onEvent({ sysEvent: { eventType: 10 } })
+    await settle()
+    a.checkLiveWait()
+    expect(a.hintText()).toContain('正在转写')
+    if (offline) {
+      ws.drop()
+      await settle()
+    }
+    await new Promise(r => setTimeout(r, 40))
+    a.checkLiveWait()
+    if (offline) {
+      expect(a.bodyText()).toContain('你说：等不到')
+      return
+    }
+    expect(a.bodyText()).not.toContain('你说：')
+    expect(a.hintText()).toContain('转写超时')
+  })
 })
