@@ -307,4 +307,66 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     expect(a.bodyText()).not.toContain('你说：')
     expect(a.hintText()).toContain('转写超时')
   })
+
+  it('M3-5: 新对话 sends session.new from the menu; the hint says when newer content is below; a scheduled resend shows 重发; the phone-page log holds no transcript, token or pairing code', async () => {
+    const { App } = await import('../src/app')
+    const bridge = {
+      audioControl: vi.fn(async () => true),
+      createStartUpPageContainer: vi.fn(async () => 0),
+      rebuildPageContainer: vi.fn(async () => true),
+      textContainerUpgrade: vi.fn(async () => true),
+      shutDownPageContainer: vi.fn(async () => true),
+      onEvenHubEvent: vi.fn(),
+      onLaunchSource: vi.fn(),
+      onDeviceStatusChanged: vi.fn(),
+      getDeviceInfo: vi.fn(async () => null),
+    } as unknown as EvenAppBridge
+    const store = new MemoryStore()
+    store.map.set(STORE_KEYS.token, 'kgd_secret_token_value')
+    const sockets: FakeWs[] = []
+    const app = new App(bridge, { render() {} }, null, {
+      store,
+      fetch: vi.fn(async () => Response.json({})),
+      ws: (url, protocols) => {
+        const ws = new FakeWs(url, protocols)
+        sockets.push(ws)
+        return ws
+      },
+      voiceTailMs: 0,
+    })
+    const a = app as unknown as { bodyText(): string; hintText(): string; statusLine(): string; onEvent(e: unknown): void; log: { last(n: number): Array<{ m: string }> } }
+    await app.start()
+    await settle()
+    const ws = sockets[0]
+    ws.open()
+    ws.frame({ t: 'auth.ok' })
+    a.onEvent({ sysEvent: { eventType: 3 } })
+    a.onEvent({ textEvent: { eventType: 2 } })
+    a.onEvent({ textEvent: { eventType: 2 } })
+    expect(a.bodyText()).toContain('> 3. 新对话')
+    a.onEvent({ sysEvent: { eventType: 0 } })
+    expect(ws.json().filter(m => m.t === 'session.new')).toHaveLength(1)
+    expect(a.hintText()).toContain('已开始新对话')
+    expect((app as unknown as { screen: { kind: string } }).screen.kind).toBe('kid')
+    const long = 'Kid的长回复SECRETKIDTEXT'.repeat(40)
+    ws.frame({ t: 'msg', seq: 1, from: 'kid', text: long, at: 1, session: 's1' })
+    await settle()
+    a.onEvent({ sysEvent: { eventType: 0 } })
+    await settle()
+    ;(app as unknown as { flash: unknown }).flash = null
+    expect(a.hintText()).toMatch(/↓ 下面还有 下滑查看 1\/\d/)
+    for (let i = 0; i < 5; i++) a.onEvent({ textEvent: { eventType: 2 } })
+    expect(a.hintText()).not.toContain('↓')
+    a.onEvent({ textEvent: { eventType: 1 } })
+    expect(a.hintText()).toContain('↓ 下面还有')
+    ws.frame({ t: 'turn.pending', cid: 'voice-cid-0009', text: '我说的秘密SECRETVOICETEXT' })
+    ws.frame({ t: 'error', code: 'slack-unreachable', message: 'x', cid: 'voice-cid-0009' })
+    await settle()
+    expect(a.statusLine()).toContain('重发1')
+    ws.drop()
+    await settle()
+    expect(a.statusLine()).toContain('待发1')
+    const log = a.log.last(400).map(e => e.m).join('\n')
+    for (const leak of ['SECRETKIDTEXT', 'SECRETVOICETEXT', 'kgd_secret_token_value', 'voice-cid-0009']) expect(log, leak).not.toContain(leak)
+  })
 })

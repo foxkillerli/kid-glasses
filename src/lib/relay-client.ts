@@ -65,6 +65,8 @@ export interface RelayClientDeps {
 const OPEN = 1
 const CONNECTING = 0
 export const CLOSE_UNAUTHORIZED = 4401
+const PENDING_CID_RE = /^[A-Za-z0-9_-]{8,64}$/
+const MAX_PENDING_CHARS = 2000
 
 export function backoffDelay(attempt: number, random: number, baseMs: number = RELAY_TIMING.backoffBaseMs, maxMs: number = RELAY_TIMING.backoffMaxMs): number {
   const cap = Math.min(maxMs, baseMs * 2 ** Math.min(attempt, 16))
@@ -281,6 +283,21 @@ export class RelayClient {
     }
   }
 
+  private dropSocketNow(code: number): void {
+    const ws = this.ws
+    this.ws = null
+    if (ws) {
+      ws.onopen = ws.onmessage = ws.onclose = ws.onerror = null
+      try {
+        ws.close(1000, 'bye')
+      } catch {
+        this.log('relay close failed')
+      }
+    }
+    this.log(`relay server ended the socket (${code === CLOSE_UNAUTHORIZED ? 'unauthorized' : 'auth timeout'})`)
+    void this.onClosed(code)
+  }
+
   private async onClosed(code: number): Promise<void> {
     this.clearTimers()
     if (code === CLOSE_UNAUTHORIZED) {
@@ -355,11 +372,18 @@ export class RelayClient {
         return
       }
       case 'error': {
+        if ((m.code === 'unauthorized' || m.code === 'auth-timeout') && this.stateValue !== 'online') {
+          this.dropSocketNow(m.code === 'unauthorized' ? CLOSE_UNAUTHORIZED : 4000)
+          return
+        }
         const cid = typeof m.cid === 'string' ? m.cid : undefined
         if (cid) this.failOutbox(cid, String(m.code))
         this.deps.events.error?.(String(m.code), String(m.message), cid)
         return
       }
+      case 'turn.pending':
+        if (typeof m.cid === 'string' && typeof m.text === 'string') this.adoptPending(m.cid, m.text)
+        return
       case 'asr.partial':
       case 'asr.final':
         this.deps.events.asr?.(m.t === 'asr.partial' ? 'partial' : 'final', String(m.text ?? ''), typeof m.cid === 'string' ? m.cid : undefined)
@@ -434,7 +458,25 @@ export class RelayClient {
       return
     }
     void this.persistOutbox()
-    const delay = Math.min(this.t.retryBaseMs * 3 ** (e.tries - 1), 5 * 60_000)
+    this.scheduleResend(cid, e.tries)
+  }
+
+  private adoptPending(cid: string, text: string): void {
+    const clean = text.trim()
+    if (!PENDING_CID_RE.test(cid) || !clean || clean.length > MAX_PENDING_CHARS) return
+    if (this.outbox.some(e => e.cid === cid)) return
+    if (this.outbox.length >= this.t.outboxMax) {
+      this.log('relay outbox full; pending voice turn not kept')
+      return
+    }
+    this.outbox = [...this.outbox, { cid, text: clean, at: this.deps.now(), tries: 0 }]
+    this.log('relay pending voice turn kept for resend')
+    void this.persistOutbox()
+    this.scheduleResend(cid, 1)
+  }
+
+  private scheduleResend(cid: string, tries: number): void {
+    const delay = Math.min(this.t.retryBaseMs * 3 ** (tries - 1), 5 * 60_000)
     const old = this.retryTimers.get(cid)
     if (old !== undefined) this.deps.timers.clearTimeout(old)
     this.retryTimers.set(

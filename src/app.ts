@@ -115,9 +115,10 @@ type Screen =
   | { kind: 'mic' }
   | { kind: 'bg' }
 
-const MENU: Array<{ label: string; open?: () => Screen; action?: 'lang' }> = [
+const MENU: Array<{ label: string; open?: () => Screen; action?: 'lang' | 'session' }> = [
   { label: 'Kid (M1)', open: () => ({ kind: 'kid' }) },
   { label: '语言', action: 'lang' },
+  { label: '新对话（Slack 新话题）', action: 'session' },
   { label: 'Glyph test (CJK)', open: () => ({ kind: 'glyph', page: 0 }) },
   { label: 'Page capacity', open: () => ({ kind: 'cap', page: 0 }) },
   { label: 'Mic capture', open: () => ({ kind: 'mic' }) },
@@ -549,8 +550,11 @@ export class App {
       const m = /retry in (\d+)s/.exec(this.relayDetail)
       if (m) parts[1] = `离线·${m[1]}秒后重连`
     }
-    const pending = this.relay.pending.length
-    if (pending) parts.push(`待发${pending}`)
+    const pending = this.relay.pending
+    if (pending.length) {
+      const retrying = st === 'online' && pending.some(e => e.tries > 0)
+      parts.push(`${retrying ? '重发' : '待发'}${pending.length}`)
+    }
     if (ASR_LANG_SHORT[this.asrLang]) parts.push(ASR_LANG_SHORT[this.asrLang])
     if (this.voice.active) parts.push(`● 录音 ${Math.floor((Date.now() - this.voice.startedAt) / 1000)}s`)
     parts.push(hhmm(Date.now()))
@@ -597,6 +601,7 @@ export class App {
     const v = this.conv.view()
     const page = v.pages > 1 ? ` ${v.page}/${v.pages}` : ''
     if (this.liveCid) return `… 正在转写${page}`
+    if (v.pages > 1 && v.page < v.pages) return `↓ 下面还有 下滑查看${page}`
     return `按住说话 滑动翻页 双击菜单${page}`
   }
 
@@ -921,6 +926,7 @@ export class App {
         else if (g === 'click') {
           const item = MENU[s.cursor]
           if (item.action === 'lang') this.cycleAsrLang()
+          else if (item.action === 'session') this.startNewSession()
           else if (item.open) this.screen = item.open()
         }
         break
@@ -984,6 +990,17 @@ export class App {
       if (v.active) void this.stopVoice('tap', true)
       else void this.startVoice('tap')
     }
+  }
+
+  private startNewSession(): void {
+    this.screen = { kind: 'kid' }
+    if (this.relay.state !== 'online') {
+      this.showFlash(`现在${STATE_TEXT[this.relay.state]}，等连上再开新对话`)
+      return
+    }
+    this.relay.newSession()
+    this.note('session.new sent')
+    this.showFlash('已开始新对话（Slack 新话题）')
   }
 
   private cycleAsrLang(): void {
