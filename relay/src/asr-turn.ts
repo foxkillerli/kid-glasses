@@ -251,10 +251,10 @@ export class AsrTurn {
   }
 
   private trim(): void {
-    const cap = this.L.retryBufferMs * BYTES_PER_MS
+    const keepFrom = Math.max(this.finalizedBytes, this.bytesIn - this.L.retryBufferMs * BYTES_PER_MS)
     while (this.buffer.length) {
       const c = this.buffer[0]
-      if (c.at + c.data.length <= this.finalizedBytes || this.bytesIn - c.at > cap) this.buffer.shift()
+      if (c.at + c.data.length <= keepFrom) this.buffer.shift()
       else break
     }
   }
@@ -285,7 +285,8 @@ export class AsrTurn {
     if (code !== null) this.closeCode = code
     this.ws = null
     this.clear('finalize')
-    if (this.stopRequested && this.closeSent && (code === 1000 || this.metadataSeen)) {
+    const allFinal = this.finalizedBytes >= this.bytesIn
+    if (this.stopRequested && ((this.closeSent && (code === 1000 || this.metadataSeen)) || (this.finalizeSent && code === 1000 && allFinal))) {
       this.complete('close')
       return
     }
@@ -368,7 +369,7 @@ export class AsrTurn {
 
   private complete(reason: 'finalize' | 'close' | 'timeout'): void {
     if (this.done) return
-    const text = this.assembler.partial()
+    const text = reason === 'timeout' ? this.assembler.partial() : this.assembler.finalText()
     this.finish(reason, text.length)
     this.deps.onDone({ ok: true, text, reason })
   }
