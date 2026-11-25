@@ -2,12 +2,12 @@
 
 This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 plugin to Slack:
 
-- **Glasses → Kid.** Speech, or typed text, is posted into the Kid DM channel as Fox, using Fox's user token. Each post starts with `〔眼镜〕`.
+- **Glasses → Kid.** Speech, or typed text, is posted into the Kid DM channel as the user, using the user's user token. Each post starts with `〔眼镜〕`.
 - **Kid → glasses.** Kid's replies in that DM are pushed back to the glasses.
 
-**Status (2026-11-25): deployed and configured.** Seven secrets are set by Fox: `SLACK_USER_TOKEN`, `SLACK_SIGNING_SECRET`, `KID_DM_CHANNEL_ID`, `DEEPGRAM_API_KEY`, `DEVICE_TOKEN`, `KID_WEBHOOK_URL`, `KID_WEBHOOK_SECRET`. Workers Logs are on (`observability.enabled`, `head_sampling_rate 1`). Devices pair through Fox's Slack DM (see "Device pairing").
+**Status (2026-11-25): deployed and configured.** Seven secrets are configured via `wrangler secret put` (never committed): `SLACK_USER_TOKEN`, `SLACK_SIGNING_SECRET`, `KID_DM_CHANNEL_ID`, `DEEPGRAM_API_KEY`, `DEVICE_TOKEN`, `KID_WEBHOOK_URL`, `KID_WEBHOOK_SECRET`. Workers Logs are on (`observability.enabled`, `head_sampling_rate 1`). Devices pair through the user's Slack DM (see "Device pairing").
 
-**Slack bot (2026-11-25): KK.** The Kid side of Slack is now the bot KK. `KID_DM_CHANNEL_ID`, `KID_WEBHOOK_URL` and `KID_WEBHOOK_SECRET` point to Fox's DM with KK and KK's webhook (entered by Fox in the Cloudflare dashboard, never in this repo). KK's identity is pinned with the plain vars `KID_BOT_ID` and `KID_BOT_USER_ID` in `wrangler.jsonc`, so `/health` shows `kidAllowlist: true` and only KK's messages reach the glasses. The env names keep the `KID_` prefix; the glasses UI still says Kid.
+**Slack bot:** `KID_DM_CHANNEL_ID`, `KID_WEBHOOK_URL` and `KID_WEBHOOK_SECRET` point to your DM with your assistant bot and its optional webhook (configured via `wrangler secret put`, never committed). Optionally pin the bot's identity with plain vars `KID_BOT_ID` and `KID_BOT_USER_ID` in `wrangler.jsonc` so `/health` shows `kidAllowlist: true` and only that bot's messages reach the glasses.
 
 - URL: <https://kid-glasses-relay.your-subdomain.workers.dev>
 - Slack Events request URL: `https://kid-glasses-relay.your-subdomain.workers.dev/slack/events`
@@ -15,7 +15,7 @@ This relay is a Cloudflare Worker plus one Durable Object. It connects the G2 pl
 - Durable Object namespace: `kid-glasses-relay_RelayHub`, class `RelayHub`, SQLite storage. Migration `v1` (`new_sqlite_classes`) is applied.
 - Plain-text vars only: `DEEPGRAM_MODEL=nova-3`, `DEEPGRAM_LANGUAGE=multi`, `DEEPGRAM_LANGUAGE_HINTS=zh,en`, `FAST_LANE_ENABLED=false`.
 
-Fox's setup steps are in [`../docs/M1-FOX-SETUP.md`](../docs/M1-FOX-SETUP.md).
+See the root [`README.md`](../README.md) for the step-by-step setup guide.
 
 ### How it was deployed
 
@@ -38,7 +38,7 @@ There was no `wrangler login`; the deploy went through the Cloudflare MCP:
 On a redeploy:
 
 - Do **not** resend the `v1` migration. Send migrations only when the classes change.
-- Add `"keep_bindings": ["secret_text"]` to the metadata so the secrets Fox has set survive the script upload. Verified twice on 2026-11-25: the secret names were the same before and after, and `/health` stayed true.
+- Add `"keep_bindings": ["secret_text"]` to the metadata so the secrets the user has set survive the script upload. Verified twice on 2026-11-25: the secret names were the same before and after, and `/health` stayed true.
 - Send `"observability": {"enabled": true, "head_sampling_rate": 1}` in the metadata, to match `wrangler.jsonc`.
 - Check `/health` straight after the redeploy, and compare the names of the secret bindings before and after.
 - Never list or print secret values.
@@ -53,7 +53,7 @@ On a redeploy:
 | `src/hub-core.ts` | Hub logic, runtime-free so it can be tested: sessions, threads, history, ASR flow, fast lane |
 | `src/slack-verify.ts` | Slack signing-secret check (`v0:ts:body`, HMAC-SHA256, 5 min skew, constant-time compare) |
 | `src/slack-events.ts` | Event routing for the bot-DM model (see "Inbound rules") |
-| `src/slack-client.ts` | `chat.postMessage` with Fox's `xoxp-` token. It throws `ChannelNotAllowedError` for any channel except `KID_DM_CHANNEL_ID`, which must be a `D…` id, before any request is made |
+| `src/slack-client.ts` | `chat.postMessage` with the user's `xoxp-` token. It throws `ChannelNotAllowedError` for any channel except `KID_DM_CHANNEL_ID`, which must be a `D…` id, before any request is made |
 | `src/sanitize.ts` | Outgoing: `〔眼镜〕` prefix, Slack `& < >` escaping (no mentions can form), control-char removal, 1500-char cap. Incoming: Slack markup to plain lens text, 2000-char cap |
 | `src/deepgram.ts` | Streaming URL per turn language (`linear16`, 16 kHz, mono; `auto` = `nova-3` + `multi` + `language_hint` zh/en, `zh` = `zh-CN`, `en` = `en`), message parsing, transcript joining (no spaces between CJK) |
 | `src/asr-turn.ts` | One voice turn against Deepgram: connect timeout and fallback, KeepAlive, Finalize on stop, final-wait timeout, reconnect with replay of unfinalized audio, watchdogs, content-free metrics. See [`docs/M2-PLAN.md`](../docs/M2-PLAN.md) |
@@ -64,10 +64,10 @@ On a redeploy:
 
 ## Slack model (2026-11-25)
 
-- **Workspace:** Your Workspace (`T0000000000`).
-- **Fox:** the relay posts **as Fox** with his user token (`xoxp-`) into the DM between Fox and the **Kid bot**. Fox's user id (`U0000000000`) is not hardcoded; the relay resolves it lazily with `auth.test` and caches it.
+- **Workspace:** Your Slack workspace (`T…`).
+- **the user:** the relay posts **as the user** with his user token (`xoxp-`) into the DM between the user and the **Kid bot**. The user id (`U…`) is not hardcoded; the relay resolves it lazily with `auth.test` and caches it.
 - **Kid:** replies as a bot in that DM, in-thread or top-level.
-- **Events:** the relay receives `message.im` as user events, which means for all of Fox's DMs. It considers only `KID_DM_CHANNEL_ID`.
+- **Events:** the relay receives `message.im` as user events, which means for all of the user's DMs. It considers only `KID_DM_CHANNEL_ID`.
 - **Waking Kid:** the 2026-11-25 e2e showed that a user-token post does **not** wake Kid. Kid's Slack integration drops messages that carry `app_id` / `bot_profile` at the platform level. The relay therefore also calls Kid's webhook (next section).
 
 ## Outbound: Slack post + Kid webhook
@@ -103,14 +103,14 @@ X-Kid-Signature: t=<unix seconds>,v1=<hex HMAC-SHA256(key, t + "." + rawBody)>
 
 | Event in the Kid DM | Result |
 |---|---|
-| Plain message, `bot_message`, `me_message` from anyone but Fox | Forwarded to the glasses |
+| Plain message, `bot_message`, `me_message` from anyone but the user | Forwarded to the glasses |
 | `thread_broadcast` | Forwarded once, with its `thread_ts` |
 | `file_share` | Text plus `[文件: name]`, or `[文件]` if the file has no name |
 | `message_changed` with new delivered text | Appended as `（已修改）…`, with `edited: true` on the wire; history is not rewritten. "Delivered text" is `text`, or attachment text when `text` is empty; unfurl previews are excluded. The hub also stores the last delivered text per message `ts`, so an edit with the same text is dropped even when `previous_message` is missing |
 | `message_changed` with the same text (e.g. unfurls) | Ignored |
 | `message_deleted` | Ignored |
 | Joins and other subtypes, hidden plain messages, empty text | Ignored |
-| Fox's own messages | Ignored: by `authorizations` user id in the router, by `auth.test` user id in the hub, and any text starting with `〔眼镜〕` from a sender not verified by the allowlist. A pinned Kid reply that starts with the prefix is still forwarded |
+| The user's own messages | Ignored: by `authorizations` user id in the router, by `auth.test` user id in the hub, and any text starting with `〔眼镜〕` from a sender not verified by the allowlist. A pinned Kid reply that starts with the prefix is still forwarded |
 | Optional allowlist `KID_BOT_ID` (`B…`) / `KID_BOT_USER_ID` (`U…`) | Plain vars, not secrets. When either is set, only that sender is forwarded |
 
 The hub logs each new Kid sender pair once, as `kid sender user=… bot=…`. It logs ids only, never text, so the allowlist values can be read from the Worker's real-time logs.
@@ -124,11 +124,11 @@ The hub logs each new Kid sender pair once, as `kid sender user=… bot=…`. It
 
 ## Configuration
 
-Fox enters every secret himself, in the Cloudflare dashboard or with `wrangler secret put`. None is ever committed. For local dev, copy `.dev.vars.example` to `.dev.vars`, which is gitignored.
+Set every secret with `npx wrangler secret put <NAME>` (or in the Cloudflare dashboard). None is ever committed. For local dev, copy `.dev.vars.example` to `.dev.vars`, which is gitignored.
 
 | Name | Kind | Meaning |
 |---|---|---|
-| `SLACK_USER_TOKEN` | secret | Fox's User OAuth Token (`xoxp-…`) |
+| `SLACK_USER_TOKEN` | secret | the user's User OAuth Token (`xoxp-…`) |
 | `SLACK_SIGNING_SECRET` | secret | Slack app signing secret |
 | `KID_DM_CHANNEL_ID` | secret | The one DM channel the relay may post to (`D…`) |
 | `DEEPGRAM_API_KEY` | secret | Deepgram key |
@@ -137,7 +137,7 @@ Fox enters every secret himself, in the Cloudflare dashboard or with `wrangler s
 | `DEEPGRAM_MODEL` / `DEEPGRAM_LANGUAGE` | var | Default `nova-3` / `multi`. `DEEPGRAM_LANGUAGE` is used for the plugin's `自动` setting; `中文` always uses `zh-CN` and `English` uses `en`. |
 | `DEEPGRAM_LANGUAGE_HINTS` | var | Default `zh,en`. Sent as `language_hint` only with `multi`. Invalid codes are dropped; if Deepgram still rejects the URL with HTTP 400, the turn falls back to `nova-3` + `multi` without hints. |
 | `FAST_LANE_ENABLED` | var | `"false"` |
-| `KID_BOT_ID` / `KID_BOT_USER_ID` | var, optional | Pin the Kid bot identity (see "Inbound rules"). Both are set for KK in `wrangler.jsonc` |
+| `KID_BOT_ID` / `KID_BOT_USER_ID` | var, optional | Pin the Kid bot identity (see "Inbound rules"). Set in `wrangler.jsonc` when pinning a specific bot |
 | `KID_WEBHOOK_URL` | secret, optional | Kid's webhook routine (`https://…`) |
 | `KID_WEBHOOK_SECRET` | secret, optional | HMAC key for `X-Kid-Signature` |
 
@@ -223,25 +223,25 @@ The device token never passes through a chat and is not in the public bundle. A 
 1. The plugin, which has no token yet, calls `POST /pair/start`.
    - The relay answers `{pairId, code, expiresAt}`: `pairId` is 128 random bits, `code` is 6 digits, and the pairing expires after 5 min.
    - Limits: 3 starts per minute per client, and at most 5 active pairings. The client key is `sha256(CF-Connecting-IP)[:16]`, kept in memory only and never logged.
-2. The lens shows the code. Fox types `配对 123456` by hand in the Fox ↔ Kid DM.
+2. The lens shows the code. the user types `配对 123456` by hand in the the user ↔ Kid DM.
 3. The router treats it as a confirmation only if **all** of these hold:
    - It is in `KID_DM_CHANNEL_ID`.
    - It has no `subtype`, `bot_id`, `app_id`, `bot_profile` or `hidden`. The relay's own user-token posts carry `app_id` / `bot_profile`, so they can never confirm.
    - The sender is the installing user from `authorizations`, if present.
-4. The hub then requires `user == auth.test user id` (Fox).
+4. The hub then requires `user == auth.test user id` (the user).
 5. The code is compared in constant time and is single use.
    - The message time must fall within that pairing's lifetime (allowing 10 s of skew).
    - Each confirming message (`pair:<message ts>`) is processed once, so Slack redeliveries change nothing.
    - After 5 wrong codes within 10 min, confirmations are locked for 10 min and pending pairings are cleared.
    - Each client can hold at most 2 pending pairings.
-6. The plugin polls `POST /pair/poll {pairId}` (60 per minute per client). Once Fox has confirmed, the relay mints `kgd_<64 hex>` and returns it **once** as `{status: "paired", token, deviceId}`. It stores only the token's sha256, in `pair:devices` (at most 10 devices). When an 11th device pairs, the oldest is dropped and its open sockets are closed with 4401 `evicted`.
+6. The plugin polls `POST /pair/poll {pairId}` (60 per minute per client). Once the user has confirmed, the relay mints `kgd_<64 hex>` and returns it **once** as `{status: "paired", token, deviceId}`. It stores only the token's sha256, in `pair:devices` (at most 10 devices). When an 11th device pairs, the oldest is dropped and its open sockets are closed with 4401 `evicted`.
 7. The plugin keeps the token in the SDK's local storage (`bridge.setLocalStorage`).
 
 Device auth accepts `DEVICE_TOKEN` or a paired token. A rejected paired token (close 4401) makes the plugin forget it and pair again.
 
 **Revoking.**
 
-- Fox sends `撤销配对` in the same DM, with the same checks as above. Every device whose pairing Fox confirmed before that message is deleted, even if it collected its token after the revoke was sent, and its sockets are closed with 4401 `revoked`. A redelivered or late revoke cannot remove devices confirmed after it.
+- the user sends `撤销配对` in the same DM, with the same checks as above. Every device whose pairing the user confirmed before that message is deleted, even if it collected its token after the revoke was sent, and its sockets are closed with 4401 `revoked`. A redelivered or late revoke cannot remove devices confirmed after it.
 - Rotating `DEVICE_TOKEN` does **not** revoke paired tokens, and `撤销配对` does not affect `DEVICE_TOKEN`.
 - Fallback without Slack: delete the DO storage keys `pair:devices` and `pair:pending`. The other DO keys (history, session) are unaffected.
 
@@ -257,7 +257,7 @@ Device auth accepts `DEVICE_TOKEN` or a paired token. A rejected paired token (c
 
 - **Allowed in logs:** event kinds, drop reasons, internal ids (`seq`, device id), HTTP status codes, attempt counts, text lengths. Slack user/bot ids appear once per Kid sender, for the allowlist.
 - **Never logged:** message text, transcripts, Slack event bodies, tokens, secrets, the webhook URL, `DEVICE_TOKEN`, paired tokens, pair codes, pair ids, channel ids, client IPs.
-- Fox's DMs with other people are dropped silently (`other-channel` is not logged).
+- the user's DMs with other people are dropped silently (`other-channel` is not logged).
 - Errors whose message we do not control (for example a thrown `fetch` error) reach the device only as a generic message, and the log gets only the error name.
 - `test/log-guard.test.ts` spies on `console.*` and drives say, Slack post failures, the webhook, device auth, Kid replies, ASR failure, pairing and the Worker entry routes with sentinel values. It asserts that none of them appear in the logs.
 - Cloudflare's own invocation log also records request metadata such as the URL and method. Which headers it records is not verified. By design no secret travels in a URL or header: the device token is the first WebSocket frame, and pair ids are in POST bodies.
@@ -270,7 +270,7 @@ npm run typecheck
 npm test
 ```
 
-From the repo root, `npm run relay:test` does the same. Deployment will go through the Cloudflare MCP (no `wrangler login`) and only when Fox asks for it.
+From the repo root, `npm run relay:test` does the same. Deployment will go through the Cloudflare MCP (no `wrangler login`) and only when the user asks for it.
 
 ## Review
 
@@ -287,7 +287,7 @@ Cross-family review (GPT diff-review):
 - A Kid reply is stored without waiting for an in-flight Slack post.
 - An ASR close other than 1000 is never posted.
 - Transcripts post in the order their turns started.
-- Fox's own messages are identified by `auth.test` on the user token, not by `authorizations` or the prefix.
+- The user's own messages are identified by `auth.test` on the user token, not by `authorizations` or the prefix.
 
 Each finding has a regression test in `test/`. The round-2 fixes were verified by those tests only. They were not sent back for a third review.
 
@@ -295,7 +295,7 @@ Each finding has a regression test in `test/`. The round-2 fixes were verified b
 
 These are unverified or not built yet:
 
-- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether Fox's own messages come back. Fox is excluded three ways: the installing user from `authorizations` (router), the token owner from `auth.test` (hub), and any text starting with `〔眼镜〕`.
+- **Event delivery.** It is not verified that Slack delivers `message.im` as a *user* event for every DM of the installing user, nor whether The user's own messages come back. the user is excluded three ways: the installing user from `authorizations` (router), the token owner from `auth.test` (hub), and any text starting with `〔眼镜〕`.
 - **ASR limits.** The relay stops a turn after 62 s of audio (the plugin stops at 60 s). Retry, timeouts and the chosen Deepgram config are in [`docs/M2-PLAN.md`](../docs/M2-PLAN.md). The Deepgram `Authorization` header through the outbound upgrade is confirmed by M1's device test.
 - **Unauthenticated close timing.** The alarm closes an idle unauthenticated socket about 10.1 s after it connects. A client that just waits sees the close frame then, but its `close` event only fires about 10 s later, when the TCP connection is torn down after the server-initiated close (measured 2026-11-25: close frame at 10.5 s, `close` event at 20.6 s; a client-initiated close takes 20–280 ms). The `auth-timeout` frame lets a client close its own side at once; the plugin does. The close code is 4408, not 4401, so a timeout never makes a client forget its token.
 - **Slack.** M3 bounds every Slack call, but a Slack outage longer than the plugin's retry schedule still ends with the turn dropped from the outbox (the relay offers a pending voice transcript again after the next `hello`, for 12 h).

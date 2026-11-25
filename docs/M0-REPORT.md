@@ -3,7 +3,7 @@
 Status: **M0 closed on 2026-11-25.** Both device batches are done.
 
 - Batch 1 (background probe) has exact numbers.
-- Batch 2 (glyphs, capacity, recording, long background and lock screen) was signed off by Fox as "感觉都 ok". These items are marked **真机主观通过、未精确测量** (subjectively passed on the device, not measured precisely). Every capacity number used by the code therefore comes from the simulator.
+- Batch 2 (glyphs, capacity, recording, long background and lock screen) was signed off by tester as "感觉都 ok". These items are marked **真机主观通过、未精确测量** (subjectively passed on the device, not measured precisely). Every capacity number used by the code therefore comes from the simulator.
 
 ## Summary
 
@@ -13,9 +13,9 @@ Status: **M0 closed on 2026-11-25.** Both device batches are done.
 | CJK glyphs | OK on the lens | 真机主观通过、未精确测量 |
 | Text capacity | Simulator: ZH 28 per line, EN 52–59 per line, 8 body lines, 10 full-screen lines; the lens looked OK | Simulator measured; 真机主观通过、未精确测量 |
 | Gestures: tap, double, swipe, long-press / release | Used throughout both batches | 真机主观通过 |
-| Mic (glasses only) | Recording works. **眼镜麦唯一来源：已通过 SDK 文档与代码确认；真机捂麦验证未执行（Fox 无法测试）** | 真机主观通过、未精确测量; source confirmed from code (see "Mic source evidence") |
+| Mic (glasses only) | Recording works. **眼镜麦唯一来源：已通过 SDK 文档与代码确认；真机捂麦验证未执行（tester 无法测试）** | 真机主观通过、未精确测量; source confirmed from code (see "Mic source evidence") |
 | Background: short | WebView reloads about 4–5 s after `visibility=hidden`; WS back in 98 ms; no lost ticks in foreground | Measured (batch 1) |
-| Background: long, and lock screen | OK per Fox | 真机主观通过、未精确测量 |
+| Background: long, and lock screen | OK per tester | 真机主观通过、未精确测量 |
 
 - Hardware: iPhone + Even Realities G2. Even App version: not reported; the requirement is ≥ 2.2.10.
 - Build: QR dev mode against <https://kid-glasses-m0.your-subdomain.workers.dev> (Worker `kid-glasses-m0`, Workers free tier, static assets plus a same-origin `/echo` WebSocket).
@@ -28,8 +28,8 @@ Status: **M0 closed on 2026-11-25.** Both device batches are done.
 **Mic permission**
 
 - After scanning the QR, **no iOS microphone permission prompt** appeared.
-- Recording was still pending in batch 1. The app only opens a mic from `startRecording`, so no mic had been opened when this was observed. The missing prompt therefore says nothing about mic access yet. The real check is whether a prompt appears the **first time Fox records** (batch 2).
-- Fox's requirement from this batch: record from the **G2 glasses mic only, never the phone mic**. The build after batch 1 makes the glasses mic the only source (see "Mic source evidence").
+- Recording was still pending in batch 1. The app only opens a mic from `startRecording`, so no mic had been opened when this was observed. The missing prompt therefore says nothing about mic access yet. The real check is whether a prompt appears the **first time tester records** (batch 2).
+- the tester's requirement from this batch: record from the **G2 glasses mic only, never the phone mic**. The build after batch 1 makes the glasses mic the only source (see "Mic source evidence").
 
 **Background probe** (screenshot 08:13)
 
@@ -63,7 +63,7 @@ What is not known yet:
 
 ### Batch 2 (2026-11-25, glasses-only mic build)
 
-Fox ran the remaining items and reported only "感觉都 ok", with no readings.
+tester ran the remaining items and reported only "感觉都 ok", with no readings.
 
 | Item | Result |
 |---|---|
@@ -92,8 +92,8 @@ How the wrapper counts and where it can go wrong:
 
 ## Mic source evidence
 
-> **眼镜麦唯一来源：已通过 SDK 文档与代码确认；真机捂麦验证未执行（Fox 无法测试）。**
-> Fox's instruction was: "你确保代码没问题就行".
+> **眼镜麦唯一来源：已通过 SDK 文档与代码确认；真机捂麦验证未执行（tester 无法测试）。**
+> the tester's instruction was: "你确保代码没问题就行".
 
 ### Confirmation (2026-11-25)
 
@@ -155,7 +155,7 @@ Its remaining reasons for "NOT CONFIRMED" are outside the plugin's control:
 2. **A label on the outer event envelope is invisible.** If the host put `phone` outside `jsonData`, the SDK would drop it before the plugin sees the event.
 3. **The physical mic is chosen by the host.** Native routing, fallback and permission enforcement in the Even App cannot be verified from plugin code.
 
-**Bottom line.** The plugin can only *request* the glasses mic and *refuse* frames labelled otherwise, and it does both, enforced by tests. Whether the Even App records from the glasses array when asked is a trust assumption on the host. Only a device check can settle it: phone mic covered, or the `host:` line read on the lens. That check was not run because Fox cannot do it.
+**Bottom line.** The plugin can only *request* the glasses mic and *refuse* frames labelled otherwise, and it does both, enforced by tests. Whether the Even App records from the glasses array when asked is a trust assumption on the host. Only a device check can settle it: phone mic covered, or the `host:` line read on the lens. That check was not run because tester cannot do it.
 
 ### Earlier analysis (batch 1)
 
@@ -241,7 +241,7 @@ Screenshots: `docs/screenshots/`.
 
 ## Open risks
 
-1. **Mic source: confirmed from code, not on the device.** Every request to the host says `source: "glasses"` (see "Mic source evidence"). The physical check was not run because Fox cannot do it. The remaining trust assumption is that the Even App host honours the requested source.
+1. **Mic source: confirmed from code, not on the device.** Every request to the host says `source: "glasses"` (see "Mic source evidence"). The physical check was not run because tester cannot do it. The remaining trust assumption is that the Even App host honours the requested source.
 2. **The WebView reloads on background.** In batch 1, boot #2 came about 4–5 s after `visibility=hidden`. M1 must treat any background trip as a cold start:
    - keep session state on the relay;
    - reconnect quickly;
@@ -267,7 +267,7 @@ Screenshots: `docs/screenshots/`.
   - `WsProbe`-style reconnect (3 s) with id-matched pings.
   - The whitelist must gain the relay origin (`https://` and `wss://`) once it is deployed.
 - **Lifecycle:** the localStorage ring log and boot counter, kept as a field diagnostic.
-- **Relay design** (`relay/`, deployed 2026-11-25 as `kid-glasses-relay` with no secrets): Cloudflare Worker + Durable Object, Slack DM loop with Fox's user token restricted to the Kid DM channel, Deepgram streaming, and a fast-answer lane that is off by default. Fox's steps are in `docs/M1-FOX-SETUP.md`.
+- **Relay design** (`relay/`, deployed 2026-11-25 as `kid-glasses-relay` with no secrets): Cloudflare Worker + Durable Object, Slack DM loop with the tester's user token restricted to the Kid DM channel, Deepgram streaming, and a fast-answer lane that is off by default. Setup steps are in `README.md` and `relay/README.md`.
 
 ## Open questions
 

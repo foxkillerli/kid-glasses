@@ -1,223 +1,239 @@
-# kid-glasses
+# Grok Connector (`kid-glasses`)
 
-An Even Realities G2 plugin for Even Hub. The end goal is a voice "Kid panel": voice in → relay → Slack → Fox's assistant bot → text back on the lenses.
+An open-source **Even Realities G2** smart-glasses plugin for Even Hub. Hold the temple touchpad to speak into the glasses microphone, stream live speech-to-text through **Deepgram**, send the message into a **Slack DM** with your AI assistant bot, and read replies paginated cleanly on the 576×288 lens display.
 
-**Status (2026-11-25).** M1 (relay, pairing, Slack) and M2 (Deepgram streaming) are deployed: the plugin at <https://kid-glasses-m0.your-subdomain.workers.dev>, the relay in `relay/` at <https://kid-glasses-relay.your-subdomain.workers.dev>. M3 (polish, [`docs/M3-PLAN.md`](docs/M3-PLAN.md)) is on branch `m3` and not deployed yet. The M0 probe pages below are still in the menu.
+- **Glasses-mic-only capture:** requests `AudioInputSource.Glasses` exclusively and drops any frame not labelled from the glasses mic (enforced by static and runtime tests).
+- **Live partial transcripts & letter-by-letter reply reveal:** see `你说：…` / live speech as you talk, then read assistant replies across auto-wrapped lens pages with swipe navigation.
+- **Zero secrets in the plugin:** all Slack, Deepgram, and webhook credentials live in a self-hosted **relay server** — never inside the `.ehpk` bundle or client code.
 
-| Page | What it probes |
+## Screenshots
+
+| Ready | Listening |
 |---|---|
-| Menu (hello screen) | Layout with a status line (app · page · clock), a body and a gesture hint line |
-| 1. Glyph test (CJK) | 480 common hanzi in rows with indices (`001`, `021`, …); punctuation `P01..P30`; full-/half-width pairs `W01..W31`; mixed CN/EN/digits `M01..M08`; rare chars and symbols `R01..R32`. Every sample sits in `[ ]`, so a dropped glyph shows as empty brackets |
-| 2. Page capacity | Self-describing rulers for Chinese chars per line (十=10 廿=20 卅=30 卌=40), English chars per line (digit at every 10th position), a mixed paragraph, and numbered lines for lines per page (full-screen and body area) |
-| 3. Mic capture | `audioControl(true, AudioInputSource.Glasses)` with hold-to-record (LONG_PRESS 9 / RELEASE 10) and a tap toggle as fallback. **Glasses mic only**: there is no phone-mic option and no `getUserMedia`. Shows `src: glasses`, frames, bytes, duration (16 kHz s16le mono), RMS bar plus dBFS, the per-frame `source` / `direction` after SDK normalisation (a missing source becomes `glasses`) plus the host's raw fields as `host: …`, the `audioControl` return value, and the device `conn` / `wear` / `bat` state. If no frame arrives within 3 s it shows `!! NO AUDIO FRAMES - check wear / connection` (or `AUDIO STALLED` if frames stop). The last clip is kept in memory as `Int16Array` |
-| 4. Background probe | 1 s heartbeat (ticks vs. wall-clock expected, largest gap) and a WebSocket echo ping every 5 s to the same-origin `wss://<host>/echo` on the hosted build (local dev falls back to `wss://echo.websocket.org`). Lifecycle events go into a 1000-entry localStorage ring buffer, which also counts reloads (`boot #n`) |
+| ![Ready screen](docs/screenshots/grok-connector-01-ready.png) | ![Listening screen](docs/screenshots/grok-connector-02-listening.png) |
 
-The phone screen (WebView) mirrors the current lens text in a monospace box and shows the log. Use it as the reference when you check which glyphs are missing on the lens.
+| Paged Reply | Menu |
+|---|---|
+| ![Reply screen](docs/screenshots/grok-connector-03-reply.png) | ![Menu screen](docs/screenshots/grok-connector-04-menu.png) |
 
-## Prerequisites
+## Architecture
 
-- Node ≥ 20.17 (developed on Node 26) and npm.
-- Even App **≥ 2.2.10**. SDK 0.0.16 declares `minAppVersion 2.2.10`, and long-press needs SDK ≥ 0.0.14.
-- An Even Hub developer account. Logging in once at <https://hub.evenrealities.com/login> turns on the developer section in the phone app.
-- `qrencode` (used for the PNG QR) and `zbarimg` (optional, to verify it).
-- Device testing needs no local server or open port: the test build lives on Cloudflare (see below).
-- The SDK, CLI (`evenhub`) and simulator are pinned devDependencies, so nothing is installed globally.
+```mermaid
+flowchart LR
+    G2[Even G2 Glasses<br/>Mic + 576x288 Lens] <-- BLE --> APP[Even App WebView<br/>Grok Connector Plugin]
+    APP <-- "WSS (kg.v1 + PCM 16kHz)<br/>& HTTPS /pair/*" --> RELAY[Relay Server<br/>Cloudflare Worker + Durable Object]
+    RELAY <-- "WSS streaming STT" --> DG[Deepgram API<br/>nova-3]
+    RELAY -- "chat.postMessage (xoxp-)" --> SLACK[Slack DM<br/>User <-> Assistant Bot]
+    RELAY -. "Optional signed webhook<br/>X-Kid-Signature" .-> HOOK[Bot Wake Webhook]
+    SLACK -- "Events API (message.im)" --> RELAY
+```
+
+1. **Pairing:** On first launch without a token, the plugin requests a 6-digit code (`POST /pair/start`) and shows it on the lens. Typing `配对 <code>` in your Slack DM with the bot mints a per-device token (`kgd_…`) stored only in the phone's Even bridge storage.
+2. **Outbound voice turn:** Holding/tapping the temple streams 16 kHz mono PCM from the glasses mic over `wss://<your-relay>/device` to the relay, which opens a Deepgram streaming session, pushes `asr.partial` updates back to the lens, and posts the finalized transcript to your designated Slack DM (`KID_DM_CHANNEL_ID`). If your bot integration requires a direct trigger, the relay also sends an HMAC-signed `POST` to `KID_WEBHOOK_URL`.
+3. **Inbound replies:** Slack delivers `message.im` events to `POST /slack/events`. The relay verifies Slack's HMAC signature, filters strictly to `KID_DM_CHANNEL_ID` (and optional bot allowlist), sanitizes Slack markup for the lens, and pushes `msg` frames over the WebSocket.
+4. **Offline / transient recovery:** Pending voice transcripts and thread cursors survive WebView background reloads and transient Slack failures via an outbox with idempotent `cid` deduplication.
+
+## Required Components
+
+You will need four pieces to run your own instance:
+
+1. **Even Realities G2 + Even App / Even Hub**
+   - Paired G2 glasses and the Even Realities mobile app (≥ 2.2.10), plus an Even Realities developer account at [hub.evenrealities.com](https://hub.evenrealities.com/).
+2. **Slack Workspace + Slack App**
+   - A Slack workspace containing a direct message (`D…`) between you and your AI assistant bot.
+   - A Slack App configured with **User Token Scopes** (`chat:write`, `im:history`, `im:read`) and **Event Subscriptions** subscribed to the user event `message.im`.
+   - *(Optional)* An HTTPS webhook endpoint (`KID_WEBHOOK_URL` + `KID_WEBHOOK_SECRET`) if your Slack bot platform ignores messages created with a user OAuth token (`app_id` / `bot_profile`) and needs an explicit webhook wake-up.
+3. **Relay Server — Cloudflare Workers + Durable Objects (Recommended)**
+   - **Why Cloudflare Workers is strongly recommended:**
+     - **Single-deploy WebSocket + state:** Cloudflare Workers paired with a SQLite-backed Durable Object (`RelayHub`) handles WebSocket hibernation, per-device pairing state, message history, and outbound Deepgram WebSocket streaming without managing servers, TLS certificates, or reverse proxies.
+     - **Free-tier friendly:** `relay/wrangler.jsonc` uses `workers_dev: true` and `new_sqlite_classes` migrations, which work on the **Cloudflare Workers Free plan** (no paid plan or custom domain required for personal use).
+     - **Isolated secrets:** API keys are stored encrypted via `wrangler secret put` and never bundled into the glasses `.ehpk`.
+4. **Deepgram Account**
+   - A [Deepgram](https://console.deepgram.com/) API key with access to streaming `nova-3` transcription (new accounts include free starter credit).
+
+## Step-by-Step Setup
+
+### 1. Deploy the Relay Server (Cloudflare Workers)
+
+```bash
+cd relay
+npm install
+npx wrangler login
+npx wrangler deploy
+```
+
+Note the deployed Worker URL printed by Wrangler, e.g. `https://kid-glasses-relay.<your-subdomain>.workers.dev`.
+
+Set all required secrets via `wrangler secret put` (**never** commit secrets into `wrangler.jsonc` or git):
+
+```bash
+npx wrangler secret put SLACK_USER_TOKEN       # xoxp-... User OAuth Token
+npx wrangler secret put SLACK_SIGNING_SECRET   # Slack App Signing Secret
+npx wrangler secret put KID_DM_CHANNEL_ID      # D... DM channel ID with your bot
+npx wrangler secret put DEEPGRAM_API_KEY       # Deepgram API key
+npx wrangler secret put DEVICE_TOKEN           # Generate with: openssl rand -hex 32
+```
+
+*(Optional)* If your assistant bot needs an explicit signed webhook wake-up:
+
+```bash
+npx wrangler secret put KID_WEBHOOK_URL        # https://... webhook endpoint
+npx wrangler secret put KID_WEBHOOK_SECRET     # Generate with: openssl rand -hex 32
+```
+
+Verify configuration (returns booleans only, never secret values):
+
+```bash
+curl https://kid-glasses-relay.<your-subdomain>.workers.dev/health
+```
+
+See [`relay/README.md`](relay/README.md) for the complete relay protocol, webhook payload/signature spec, and troubleshooting.
+
+### 2. Configure the Slack App
+
+1. Open [api.slack.com/apps](https://api.slack.com/apps) → **Create New App** → **From a manifest**, select your workspace, and paste:
+
+   ```yaml
+   display_information:
+     name: Grok Connector
+     description: Voice relay for Even Realities G2 glasses
+   oauth_config:
+     scopes:
+       user:
+         - chat:write
+         - im:history
+         - im:read
+   settings:
+     event_subscriptions:
+       request_url: https://kid-glasses-relay.<your-subdomain>.workers.dev/slack/events
+       user_events:
+         - message.im
+     org_deploy_enabled: false
+     socket_mode_enabled: false
+     token_rotation_enabled: false
+   ```
+
+2. Install the app to your workspace (**OAuth & Permissions → Install to Workspace**).
+3. Copy the **User OAuth Token** (`xoxp-…`) → `SLACK_USER_TOKEN` and **Signing Secret** → `SLACK_SIGNING_SECRET`.
+4. Confirm **Event Subscriptions** shows **Verified** for `https://kid-glasses-relay.<your-subdomain>.workers.dev/slack/events`.
+5. Open a DM with your assistant bot in Slack, copy its channel ID (`D…` from the browser URL or `conversations.list?types=im`), and set it as `KID_DM_CHANNEL_ID`.
+6. *(Optional)* To pin which bot in the DM can push replies to your glasses, set `KID_BOT_ID` (`B…`) and/or `KID_BOT_USER_ID` (`U…`) in `relay/wrangler.jsonc` and redeploy.
+
+### 3. Configure & Build the Glasses Plugin
+
+From the repository root:
 
 ```bash
 npm install
 ```
 
-## Run in the simulator
+1. Update `app.json`:
+   - Set a globally unique reverse-domain `package_id` (lowercase letters/numbers only, no hyphens, e.g. `com.yourname.grokconnector`).
+   - Update `permissions` → `network` → `whitelist` to your relay domain (`https://kid-glasses-relay.<your-subdomain>.workers.dev` and `wss://kid-glasses-relay.<your-subdomain>.workers.dev`).
+2. Point the build at your relay origin via `VITE_RELAY_ORIGIN` (or `.env.local`, which is gitignored):
 
 ```bash
-npm run dev
-WEBKIT_DISABLE_DMABUF_RENDERER=1 NO_PROXY=localhost,127.0.0.1 no_proxy=localhost,127.0.0.1 \
-  npx evenhub-simulator http://localhost:5173 --automation-port 9898
+VITE_RELAY_ORIGIN=https://kid-glasses-relay.<your-subdomain>.workers.dev npm run pack
 ```
 
-Two Linux quirks showed up on this machine:
+This builds `dist/` and packs `grok-connector.ehpk` using `@evenrealities/evenhub-cli`.
 
-- Under Wayland, WebKitGTK crashed with `Gdk Error 71`. `WEBKIT_DISABLE_DMABUF_RENDERER=1` fixes it.
-- With `HTTP(S)_PROXY` set, the webview showed "Message was restarted too many times" for localhost. Exempting localhost with `NO_PROXY` fixes it.
+### 4. Install on Even G2 (Beta / Private Build or QR Sideload)
 
-`scripts/sim.sh` drives the simulator's automation API:
+1. Sign in at [hub.evenrealities.com/login](https://hub.evenrealities.com/login) with the same account used in the Even Realities mobile app.
+2. Create an app and upload `grok-connector.ehpk` (via the portal or `npx evenhub create grok-connector.ehpk --name "Grok Connector" --tagline "Hold to talk with your AI on G2" --icon <24x24.png>`).
+3. **Recommended — Beta build** (appears on the glasses menu and survives locked-phone backgrounding):
+   - Add your Even account email under **Testing group** and accept the invitation email (`Status: Active`).
+   - Click the build's `Private` tag → **Beta** → **Promote to Beta**.
+   - In the Even Realities phone app: **Me → Beta tester → Install**.
+4. **First-run pairing:** Open **Grok Connector** on your glasses. A 6-digit pairing code appears on the lens; type `配对 <code>` in your Slack DM with the bot to pair.
 
-```bash
-scripts/sim.sh input down click long_press long_press_release double_click
-scripts/sim.sh shot my-shot
-scripts/sim.sh console
-```
+For fast local iteration without packaging, use `npm run simulate` with `@evenrealities/evenhub-simulator`.
 
-`shot` writes `docs/screenshots/my-shot.png`, composited on black.
+## Configuration Reference
 
-The simulator screenshots in `docs/screenshots/` use the **simulator's** font.
+### Relay Secrets & Variables (`relay/`)
 
-## Lens text capacity
-
-`src/lib/lens-text.ts` has the single config constant `LENS_TEXT`, which all pagination uses:
-
-| Field | Value | Source |
+| Name | Kind | Description |
 |---|---|---|
-| `zhCharsPerLine` | 28 | Simulator, Cap ZH ruler |
-| `enCharsPerLine` | 52 | Simulator, the lower of the two EN rulers (abc 59, xxx 52) |
-| `bodyLines` | 8 | Simulator, Lines body page |
-| `fullScreenLines` | 10 | Simulator, Lines full page |
-| `pageMaxBytes` | 900 | Margin under the 1000-byte create/rebuild limit |
+| `SLACK_USER_TOKEN` | Secret | User OAuth Token (`xoxp-…`) for posting to `KID_DM_CHANNEL_ID` |
+| `SLACK_SIGNING_SECRET` | Secret | Slack App Signing Secret (`v0:ts:body` verification) |
+| `KID_DM_CHANNEL_ID` | Secret | Single allowed Slack DM channel ID (`D…`) |
+| `DEEPGRAM_API_KEY` | Secret | Deepgram API key for streaming STT |
+| `DEVICE_TOKEN` | Secret | Master device token (≥ 32 chars) used for manual auth or admin recovery |
+| `KID_WEBHOOK_URL` | Secret *(opt)* | `https://…` webhook URL called after each Slack post |
+| `KID_WEBHOOK_SECRET` | Secret *(opt)* | HMAC-SHA256 secret for `X-Kid-Signature` |
+| `DEEPGRAM_MODEL` | Var | Default `nova-3` |
+| `DEEPGRAM_LANGUAGE` | Var | Default `multi` (used when lens language is Auto) |
+| `DEEPGRAM_LANGUAGE_HINTS` | Var | Default `zh,en` |
+| `FAST_LANE_ENABLED` | Var | Default `"false"` |
+| `KID_BOT_ID` / `KID_BOT_USER_ID` | Var *(opt)* | Pin allowed assistant bot sender IDs in `relay/wrangler.jsonc` |
 
-- Fox checked these on the real lenses and judged them OK, but did not measure them precisely.
-- `wrapForLens` counts a wide char (CJK, fullwidth, kana, hangul, emoji) as 1/28 of a line and any other char as 1/52.
-- `paginateForLens` splits text into pages of `bodyLines` lines.
-- Known risk: runs of capitals or digits are wider than `x` in the font. In the pretext model, 52 × `W` is 832 px against a 568 px line, so all-caps text can wrap on the lens earlier than the counter predicts.
+For local relay development, copy `relay/.dev.vars.example` to `relay/.dev.vars` (gitignored).
 
-## Build / package
+### Plugin Build-Time Config
+
+- `VITE_RELAY_ORIGIN`: Relay HTTPS origin compiled into `dist/` (defaults to `https://kid-glasses-relay.your-subdomain.workers.dev`).
+- `app.json`: Even Hub manifest (`package_id`, `name`, `version`, `min_sdk_version`, `permissions`, `supported_languages`).
+
+## Development & Tests
 
 ```bash
+# Plugin (from repo root)
 npm run typecheck
 npm test
 npm run build
 npm run pack
+
+# Relay (from repo root)
+npm run relay:typecheck
+npm run relay:test
+
+# Local simulator
+npm run dev
+npm run simulate
 ```
 
-`npm run pack` runs `evenhub pack app.json dist --sdk-ver 0.0.16` and writes `grok-connector.ehpk`, which is gitignored.
+- **Plugin tests** (`tests/`): Vitest suite covering lens text wrapping/pagination, conversation state, progressive reveal, pairing/relay client reconnection & outbox recovery, `app.json` manifest rules, and static/runtime guarantees that only the glasses microphone is ever requested.
+- **Relay tests** (`relay/test/`): Vitest suite covering Slack signature verification, `D…` channel allowlist enforcement, Deepgram streaming & fallback, pairing brute-force lockout, HMAC webhook signing, and content-free log guards.
 
-A packaged `.ehpk` can only reach a phone by uploading it to the Even Hub portal as a Private build (portal → Builds, then on the phone Even Hub → Me → Apps → Private builds). **M0 does not upload anything.** Real-device testing uses the QR dev mode against the Cloudflare-hosted build below.
+## Security Notes
 
-## Sideload to iPhone + G2 (QR dev mode, Cloudflare-hosted)
+- **No secrets in client bundles:** `.ehpk` packages are extractable zip-like archives; never embed API keys or tokens in frontend code or `app.json`.
+- **WebSocket auth off the URL/headers:** The plugin connects with public subprotocol `kg.v1` and sends `{"t":"auth","token":"…"}` as the first frame; unauthenticated sockets are swept after 10 s.
+- **Single-channel Slack enforcement:** `KID_DM_CHANNEL_ID` must be a `D…` DM ID; `SlackClient` refuses all other channel IDs before making any outbound API call, and inbound events for other DMs are silently dropped without logging.
+- **Content-free relay logs:** Relay logs record event types, status codes, sequence numbers, and byte/character counts — never message bodies, tokens, secrets, webhook URLs, or client IPs.
+- **Glasses mic only:** `audioControl` is called only inside `src/lib/mic-control.ts` with `AudioInputSource.Glasses`.
 
-The test build is hosted on Cloudflare at **<https://kid-glasses-m0.your-subdomain.workers.dev>**:
+## Project Structure
 
-- Worker `kid-glasses-m0` on the Workers free tier.
-- The built `dist/` is served as Workers static assets.
-- `worker/echo-worker.js` adds a same-origin WebSocket echo at `/echo`.
-- No bindings, no secrets, no custom domain.
+```text
+.
+├── app.json                 # Even Hub app manifest
+├── index.html               # Phone-side WebView mirror page
+├── package.json             # Plugin scripts & Even Hub SDK/CLI deps
+├── src/
+│   ├── main.ts              # Bridge boot & WebView mirror wiring
+│   ├── app.ts               # Glasses state machine, menus, pairing & voice UI
+│   ├── content/             # Glyph & capacity test pages
+│   └── lib/                 # Display queue, lens wrapping, conversation, relay/pairing clients
+├── tests/                   # Plugin Vitest suite
+├── relay/
+│   ├── wrangler.jsonc       # Cloudflare Worker + Durable Object config
+│   ├── .dev.vars.example    # Local secret template
+│   ├── src/                 # Worker router, RelayHub DO, Slack, Deepgram, webhook, pairing
+│   └── test/                # Relay Vitest suite
+├── docs/
+│   ├── M0-REPORT.md         # G2 display, glyph & audio capability probe findings
+│   └── screenshots/         # Store & probe screenshots
+├── scripts/                 # Simulator & Cloudflare asset upload helpers
+└── worker/                  # Optional static-asset + /echo Worker for QR dev mode
+```
 
-Nothing is served from the desktop, and the phone needs no particular Wi-Fi; any internet connection works.
+## Contributing
 
-QR files:
+Issues and pull requests are welcome. Please run `npm run typecheck && npm test && npm run relay:typecheck && npm run relay:test` before submitting, and never include real tokens, channel IDs, or personal endpoints in commits or test fixtures.
 
-- `docs/sideload-qr.png` is the QR image.
-- `docs/sideload-qr.txt` is the `evenhub qr` ASCII output.
-- Both encode the bare URL `https://kid-glasses-m0.your-subdomain.workers.dev`. `evenhub qr --url … --json` reports exactly that URL, and both files decode to it with `zbarimg`.
+## License
 
-Steps for Fox:
-
-1. Check the phone app: **Even App ≥ 2.2.10**.
-2. Sign in once at <https://hub.evenrealities.com/login> with the same account as the phone app. This turns the account into a developer account.
-3. Force-quit the Even App by swiping it away in the app switcher, then reopen it.
-4. Open the **Even Hub** tab. A developer section appears top-right. Tap **Scan QR** and scan `docs/sideload-qr.png`.
-5. The plugin opens on the glasses. Double-tap on the menu brings up the system exit dialog.
-6. The phone screen mirrors the lens text and shows the probe log:
-   - If gestures seem dead, check "events seen / last gesture" there.
-   - For the background test, the phone log is the authoritative record.
-
-### Redeploying (Cloudflare MCP, no wrangler login)
-
-1. Build and hash the assets:
-   - Run `npm run build`.
-   - Run `node scripts/cf-manifest.mjs dist`. Leave `/_headers` out of the manifest; it goes into `assets.config._headers` instead.
-2. Through the Cloudflare MCP, call `POST /accounts/{id}/workers/scripts/kid-glasses-m0/assets-upload-session` with that manifest. It returns a one-hour upload JWT and the buckets.
-3. Save the JWT to a file under `$TMPDIR`, then run `CF_ACCOUNT_ID=… scripts/cf-upload-assets.sh <jwt-file> <hash>=dist/<path> …`. The last upload prints the completion JWT.
-4. Through the Cloudflare MCP, `PUT /accounts/{id}/workers/scripts/kid-glasses-m0` with:
-   - a multipart body holding `worker/echo-worker.js` as the main module;
-   - `bindings: []`;
-   - `assets.jwt` set to the completion JWT;
-   - `assets.config._headers` set to the contents of `public/_headers`.
-5. Verify:
-   - `curl` the page and the hashed JS, then compare the JS sha256 against `dist/`.
-   - Open a WebSocket to `/echo`.
-
-The upload JWT is a short-lived per-upload token, not an account credential. Never commit it.
-
-## Gestures
-
-| Page | Swipe | Tap | Double-tap | Hold |
-|---|---|---|---|---|
-| KK (start page) | down = newer page, up = older | start / stop talking; while pairing: new code | menu | hold = talk, release = send |
-| Menu | move cursor | open | exit dialog | – |
-| Glyph / Capacity | down = next, up = prev | – | back to menu | – |
-| Mic | – | start / stop | stop and back to menu | hold = record, release = stop |
-| BG probe | – | WS reconnect | back to menu | clear log + reset heartbeat |
-
-## Network whitelist and CORS
-
-`app.json` asks for `g2-microphone` and `network` only; `phone-microphone` was removed because the plugin records from the glasses mic only. The network whitelist holds the plugin's own origin and the relay, each in two schemes:
-
-- `https://kid-glasses-m0.your-subdomain.workers.dev`
-- `wss://kid-glasses-m0.your-subdomain.workers.dev`
-- `https://kid-glasses-relay.your-subdomain.workers.dev`: pairing (`/pair/start`, `/pair/poll`)
-- `wss://kid-glasses-relay.your-subdomain.workers.dev`: `/device`, for messages and speech
-
-How the background probe picks its echo:
-
-- When the page is served over https from a non-localhost origin, it uses the same-origin echo `wss://<origin>/echo`. The Worker sends a "kid-glasses echo ready" greeting, which the probe ignores, and then echoes every frame.
-- When run locally (`npm run dev` plus the simulator), it falls back to the public echo `wss://echo.websocket.org`. That endpoint is not in the whitelist, because the packaged or hosted build never uses it.
-
-All requests are same-origin. Static assets also carry `Access-Control-Allow-Origin: *` through `public/_headers`, and `index.html` is served with `Cache-Control: no-cache`, so a redeploy shows up on the next scan.
-
-## M1: talking to KK
-
-The plugin opens on the **KK** page (menu item 1; the Slack bot is KK, internally still called `kid`).
-
-**Pairing.** On first start it has no device token. It gets a 6-digit code from the relay and shows it on the lens. Fox types `配对 <code>` in his Slack DM with KK. The plugin then receives its own token and stores it in the SDK's local storage. No token is ever typed into the plugin or built into the bundle. Details are in [`relay/README.md`](relay/README.md#device-pairing).
-
-**Talking.** Hold to talk and release to send, or tap to start and tap again to send.
-
-- Audio comes from the G2 glasses mic only, through the same `checkFrameSource` gate as M0.
-- It streams to the relay (Deepgram); the transcript is posted to Slack as `〔眼镜〕…` and KK's webhook is called.
-- The live transcript shows as `你说：…` while you talk. After release the plugin keeps forwarding frames for the mic close plus 250 ms, then sends `audio.stop`, so the last words are not cut off.
-- **New conversation** (M3): the menu's third item `新对话（Slack 新话题）` sends `session.new`, so the next message starts a new Slack thread.
-- **Lost-post recovery** (M3): if Slack fails after a transcript is ready, the relay sends `turn.pending` and the plugin resends it from its outbox with the same cid. The status line shows `待发N` while offline and `重发N` while a resend is scheduled.
-- **Language** (M2): the menu's second item cycles `自动（中英）` → `中文` → `English`. The choice is stored on the phone and sent with every `audio.start`. Config and limits: [`docs/M2-PLAN.md`](docs/M2-PLAN.md); device test: [`docs/M2-DEVICE-TEST.md`](docs/M2-DEVICE-TEST.md).
-- KK's replies appear on the lens as `KK：…`, paginated with `LENS_TEXT`.
-
-**Paging** (`src/lib/conversation.ts`). Pages flip when they fill, never on a timer. When the current page is not the last one, the hint line says `↓ 下面还有 下滑查看 N/M` (M3).
-
-- Growing content (the live transcript `你说：…` in the body while you talk, and each new message) keeps the view on the page that holds the newest text, so it advances the moment the current page fills.
-- After you swipe back to an older page, re-layout and redraws leave you there. New content (a new transcript chunk or a new message) brings you back to the newest page, and fill-triggered advance resumes. The relay echoing a turn already shown as `我（待发）` does not count as new.
-- A new KK reply is revealed progressively at `READING_SPEED` (6 CJK / 15 Latin chars per second), and the page flips the moment it fills, then writing continues. This is on: `PROGRESSIVE_KID_REVEAL = true` in `src/lib/kid-reveal.ts`, a one-line switch. Set it to `false` and a reply shows in full from its first page.
-- A tap or swipe during the reveal shows the rest at once; a swipe also moves one page. New content ends the reveal and goes to the newest page. Replayed (catch-up) and history replies are shown in full, without a reveal.
-
-**Connection** (`src/lib/relay-client.ts`):
-
-- First frame `auth`, then `hello {lastSeq}` and one history page.
-- `ping` every 25 s; reconnect after 70 s without any frame.
-- Exponential backoff with jitter (1–30 s). Reconnects immediately on visible / pageshow / online / foreground.
-- `lastSeq` and unacknowledged typed turns persist across the background reload.
-- Typed turns are resent with the same `cid` and the relay dedupes them.
-
-The plugin is still served from `kid-glasses-m0`, so the QR code is unchanged. The relay is Worker `kid-glasses-relay`, with a SQLite Durable Object `RelayHub`. Secrets are entered only by Fox ([`docs/M1-FOX-SETUP.md`](docs/M1-FOX-SETUP.md)). Fox's device test is [`docs/M1-DEVICE-TEST.md`](docs/M1-DEVICE-TEST.md).
-
-## Real-device test plan
-
-Run on iPhone + G2 through QR dev mode against the hosted build. Record the results in `docs/M0-REPORT.md`, "Device results".
-
-**Setup**
-
-- [ ] Note the Even App version and the glasses battery level.
-- [ ] Close the plugin completely, reopen it, and confirm the build: on the mic page the hint reads `hold: rec  tap: toggle  2tap: menu`.
-
-**Glyphs (page 1)**
-
-- [ ] Swipe through every Hanzi page. Note the index (`001`, `021`, …) of any row with a missing or garbled glyph.
-- [ ] On the Punct / Full-half / Mixed / Rare pages, note every sample id whose brackets are empty (`P07[]`) or show a box.
-
-**Capacity (page 2)**
-
-- [ ] Cap ZH: the last ruler mark (十 / 廿 / 卅) visible on the first line, which gives Chinese chars per line. The simulator shows 28.
-- [ ] Cap EN: the last digit visible on the abc and xxx rulers. The simulator shows 59 and 52.
-- [ ] Lines full and Lines body: the last line number visible. The simulator shows 10 and 8.
-
-**Mic (page 3), glasses only**
-
-- [ ] Hold 3–5 s, then release. Note `frames`, `bytes`, duration, `audioControl open -> …`, `ev src … dir …` and the full `host: …` line.
-- [ ] Note whether an iOS microphone prompt appears at the first recording.
-- [ ] Tap to start, tap to stop: the same readings.
-- [ ] RMS silent vs. talking.
-- [ ] Physical check: with the phone in another room or its mic covered, speak near the glasses or tap the frame. Does RMS jump?
-- [ ] Take the glasses off (`wear false`) and record. Does `!! NO AUDIO FRAMES` appear within 3 s?
-
-**Background (page 4)**
-
-- [ ] Foreground for 2 min: ticks vs. expected, lost, max gap, WS pong count.
-- [ ] Switch to another app for 30 s, 5 min and 30 min, then return. Note `boot #`, ticks / lost / max gap, WS reconnects, and the log lines around `visibility=hidden`.
-- [ ] Lock the phone for 5 min with the plugin open, unlock, and note the same readings.
+[MIT](LICENSE) © 2026 Fox Li

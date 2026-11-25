@@ -1,5 +1,8 @@
-export const RELAY_ORIGIN = 'https://kid-glasses-relay.your-subdomain.workers.dev'
-export const RELAY_WS_URL = 'wss://kid-glasses-relay.your-subdomain.workers.dev/device'
+const envOrigin = (import.meta as unknown as { env?: Record<string, string | undefined> }).env?.VITE_RELAY_ORIGIN?.trim()
+const origin = (envOrigin || 'https://kid-glasses-relay.your-subdomain.workers.dev').replace(/\/+$/, '')
+
+export const RELAY_ORIGIN = origin
+export const RELAY_WS_URL = origin.replace(/^http/, 'ws') + '/device'
 export const RELAY_PROTOCOL = 'kg.v1'
 
 export const RELAY_TIMING = {

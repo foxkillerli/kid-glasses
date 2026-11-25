@@ -12,8 +12,9 @@
     "DEEPGRAM_MODEL": "nova-3",
     "DEEPGRAM_LANGUAGE": "multi",
     "DEEPGRAM_LANGUAGE_HINTS": "zh,en",
-    "FAST_LANE_ENABLED": "false",
-    "KID_BOT_ID": "B0000000000",
-    "KID_BOT_USER_ID": "U0000000001"
+    "FAST_LANE_ENABLED": "false"
+    // Optional: pin your assistant bot IDs (discover via Slack or relay logs)
+    // "KID_BOT_ID": "B0...",
+    // "KID_BOT_USER_ID": "U0..."
   }
 }
