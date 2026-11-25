@@ -1,5 +1,5 @@
 import { buildListenUrl, connectDeepgram, listenOptionsFor } from './deepgram'
-import { AUTH_TIMEOUT_MS, type SocketAttachment } from './device-auth'
+import { AUTH_ALARM_SLACK_MS, AUTH_TIMEOUT_FRAME, AUTH_TIMEOUT_MS, sweepUnauthed, type SocketAttachment } from './device-auth'
 import type { Env } from './env'
 import { fastLaneFor } from './fast-lane'
 import { CLOSE_UNAUTHORIZED, HubCore, isAuthed, type AsrSocket } from './hub-core'
@@ -84,7 +84,7 @@ export class RelayHub implements DurableObject {
       this.state.acceptWebSocket(server)
       const attachment: SocketAttachment = { authed: false, connectedAt: Date.now() }
       server.serializeAttachment(attachment)
-      const due = Date.now() + AUTH_TIMEOUT_MS + 500
+      const due = attachment.connectedAt + AUTH_TIMEOUT_MS + AUTH_ALARM_SLACK_MS
       const current = await this.state.storage.getAlarm()
       if (current === null || current > due) await this.state.storage.setAlarm(due)
       const protocol = request.headers.get(PROTOCOL_HEADER)
@@ -105,19 +105,17 @@ export class RelayHub implements DurableObject {
   }
 
   async alarm(): Promise<void> {
-    const now = Date.now()
-    let pending = false
-    for (const ws of this.state.getWebSockets()) {
+    const sweep = sweepUnauthed(this.state.getWebSockets(), Date.now(), err => relayLog(`alarm socket skipped ${errorName(err)}`))
+    for (const ws of sweep.expired) {
       try {
-        if (isAuthed(ws)) continue
-        const a = ws.deserializeAttachment() as SocketAttachment | null
-        if (!a || now - a.connectedAt >= AUTH_TIMEOUT_MS) closeReply(ws, CLOSE_UNAUTHORIZED, 'auth timeout')
-        else pending = true
+        ws.send(AUTH_TIMEOUT_FRAME)
       } catch (err) {
-        relayLog(`alarm socket skipped ${errorName(err)}`)
+        relayLog(`auth timeout notice failed ${errorName(err)}`)
       }
+      closeReply(ws, CLOSE_UNAUTHORIZED, 'auth timeout')
     }
-    if (pending) await this.state.storage.setAlarm(now + 1000)
+    if (sweep.expired.length) relayLog(`auth timeout closed=${sweep.expired.length}`)
+    if (sweep.nextAlarmAt !== null) await this.state.storage.setAlarm(sweep.nextAlarmAt)
   }
 
   async webSocketMessage(ws: WebSocket, message: string | ArrayBuffer): Promise<void> {
