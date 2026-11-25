@@ -132,7 +132,7 @@ The upload JWT is a short-lived per-upload token, not an account credential. Nev
 
 | Page | Swipe | Tap | Double-tap | Hold |
 |---|---|---|---|---|
-| Kid (start page) | down = newer page, up = older | start / stop talking; while pairing: new code | menu | hold = talk, release = send |
+| KK (start page) | down = newer page, up = older | start / stop talking; while pairing: new code | menu | hold = talk, release = send |
 | Menu | move cursor | open | exit dialog | – |
 | Glyph / Capacity | down = next, up = prev | – | back to menu | – |
 | Mic | – | start / stop | stop and back to menu | hold = record, release = stop |
@@ -154,27 +154,27 @@ How the background probe picks its echo:
 
 All requests are same-origin. Static assets also carry `Access-Control-Allow-Origin: *` through `public/_headers`, and `index.html` is served with `Cache-Control: no-cache`, so a redeploy shows up on the next scan.
 
-## M1: talking to Kid
+## M1: talking to KK
 
-The plugin opens on the **Kid** page.
+The plugin opens on the **KK** page (menu item 1; the Slack bot is KK, internally still called `kid`).
 
-**Pairing.** On first start it has no device token. It gets a 6-digit code from the relay and shows it on the lens. Fox types `配对 <code>` in his Slack DM with Kid. The plugin then receives its own token and stores it in the SDK's local storage. No token is ever typed into the plugin or built into the bundle. Details are in [`relay/README.md`](relay/README.md#device-pairing).
+**Pairing.** On first start it has no device token. It gets a 6-digit code from the relay and shows it on the lens. Fox types `配对 <code>` in his Slack DM with KK. The plugin then receives its own token and stores it in the SDK's local storage. No token is ever typed into the plugin or built into the bundle. Details are in [`relay/README.md`](relay/README.md#device-pairing).
 
 **Talking.** Hold to talk and release to send, or tap to start and tap again to send.
 
 - Audio comes from the G2 glasses mic only, through the same `checkFrameSource` gate as M0.
-- It streams to the relay (Deepgram); the transcript is posted to Slack as `〔眼镜〕…` and Kid's webhook is called.
+- It streams to the relay (Deepgram); the transcript is posted to Slack as `〔眼镜〕…` and KK's webhook is called.
 - The live transcript shows as `你说：…` while you talk. After release the plugin keeps forwarding frames for the mic close plus 250 ms, then sends `audio.stop`, so the last words are not cut off.
 - **New conversation** (M3): the menu's third item `新对话（Slack 新话题）` sends `session.new`, so the next message starts a new Slack thread.
 - **Lost-post recovery** (M3): if Slack fails after a transcript is ready, the relay sends `turn.pending` and the plugin resends it from its outbox with the same cid. The status line shows `待发N` while offline and `重发N` while a resend is scheduled.
 - **Language** (M2): the menu's second item cycles `自动（中英）` → `中文` → `English`. The choice is stored on the phone and sent with every `audio.start`. Config and limits: [`docs/M2-PLAN.md`](docs/M2-PLAN.md); device test: [`docs/M2-DEVICE-TEST.md`](docs/M2-DEVICE-TEST.md).
-- Kid's replies appear on the lens, paginated with `LENS_TEXT`.
+- KK's replies appear on the lens as `KK：…`, paginated with `LENS_TEXT`.
 
 **Paging** (`src/lib/conversation.ts`). Pages flip when they fill, never on a timer. When the current page is not the last one, the hint line says `↓ 下面还有 下滑查看 N/M` (M3).
 
 - Growing content (the live transcript `你说：…` in the body while you talk, and each new message) keeps the view on the page that holds the newest text, so it advances the moment the current page fills.
 - After you swipe back to an older page, re-layout and redraws leave you there. New content (a new transcript chunk or a new message) brings you back to the newest page, and fill-triggered advance resumes. The relay echoing a turn already shown as `我（待发）` does not count as new.
-- A new Kid reply is revealed progressively at `READING_SPEED` (6 CJK / 15 Latin chars per second), and the page flips the moment it fills, then writing continues. This is on: `PROGRESSIVE_KID_REVEAL = true` in `src/lib/kid-reveal.ts`, a one-line switch. Set it to `false` and a reply shows in full from its first page.
+- A new KK reply is revealed progressively at `READING_SPEED` (6 CJK / 15 Latin chars per second), and the page flips the moment it fills, then writing continues. This is on: `PROGRESSIVE_KID_REVEAL = true` in `src/lib/kid-reveal.ts`, a one-line switch. Set it to `false` and a reply shows in full from its first page.
 - A tap or swipe during the reveal shows the rest at once; a swipe also moves one page. New content ends the reveal and goes to the newest page. Replayed (catch-up) and history replies are shown in full, without a reveal.
 
 **Connection** (`src/lib/relay-client.ts`):

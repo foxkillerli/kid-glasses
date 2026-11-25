@@ -4,7 +4,7 @@ import { PROGRESSIVE_KID_REVEAL, READING_SPEED, charsShownAfter, type ReadingSpe
 import type { OutboxEntry, RelayItem } from './relay-client'
 
 export const KEEP_ITEMS = 40
-export const PREFIX = { kid: 'Kid：', glasses: '我：', fast: '快答：', pending: '我（待发）：', live: '你说：' } as const
+export const PREFIX = { kid: 'KK：', glasses: '我：', fast: '快答：', pending: '我（待发）：', live: '你说：' } as const
 
 export function oneLine(s: string): string {
   const flat = s.replace(/\s+/g, ' ').trim()

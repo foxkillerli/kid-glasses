@@ -66,6 +66,8 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     await settle()
     expect(body()).toContain('配对码：246810')
     expect(body()).toContain('配对 246810')
+    expect(body()).toContain('请在 Slack 里，和 KK 的私信中')
+    expect(body()).not.toContain('Kid')
     expect(lastLayout).not.toBeNull()
 
     await (app as unknown as { pairing: { poll(): Promise<void> } }).pairing.poll()
@@ -77,14 +79,25 @@ describe('App M1 flow (fake bridge, fake relay)', () => {
     ws.open()
     expect(ws.json()[0]).toEqual({ t: 'auth', token: 'kgd_minted' })
     ws.frame({ t: 'auth.ok' })
+    const ui = app as unknown as { kidStatus(): string; screen: { kind: string; cursor?: number } }
+    expect(ui.kidStatus()).toMatch(/^KK · 在线/)
+    expect(body()).toContain('按住说话，松开就发给 KK。')
+    expect(body()).toContain('KK 的回复会显示在这里。')
+    ui.screen = { kind: 'menu', cursor: 0 }
+    expect(body()).toContain('KK Glasses · 菜单')
+    expect(body()).toContain('> 1. KK')
+    expect(body()).not.toContain('Kid')
+    ui.screen = { kind: 'kid' }
+    ws.frame({ t: 'error', code: 'kid-webhook-failed', message: 'x' })
+    expect((app as unknown as { flash: { text: string } | null }).flash?.text).toBe('已发到 Slack，但没叫醒 KK')
     ws.frame({ t: 'msg', seq: 3, from: 'kid', text: '三点半放学，我来接你', at: 1, session: 's1' })
     await settle()
-    expect(body()).toMatch(/Kid：/)
-    expect(body()).not.toContain('Kid：三点半放学，我来接你')
+    expect(body()).toMatch(/KK：/)
+    expect(body()).not.toContain('KK：三点半放学，我来接你')
     const send0 = (ev: Record<string, unknown>) => (app as unknown as { onEvent(e: unknown): void }).onEvent(ev)
     send0({ sysEvent: { eventType: 0 } })
     await settle()
-    expect(body()).toContain('Kid：三点半放学，我来接你')
+    expect(body()).toContain('KK：三点半放学，我来接你')
     expect(ws.json().some(m => m.t === 'audio.start')).toBe(false)
 
     const send = (ev: Record<string, unknown>) => (app as unknown as { onEvent(e: unknown): void }).onEvent(ev)

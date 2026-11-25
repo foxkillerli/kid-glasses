@@ -13,7 +13,7 @@ describe('Conversation (lens view)', () => {
     const lines = c.view().body.split('\n')
     expect(lines[0].startsWith('我：')).toBe(true)
     expect(fitsLensLine(lines[0])).toBe(true)
-    expect(lines[1]).toBe('Kid：三点半')
+    expect(lines[1]).toBe('KK：三点半')
   })
 
   it('a long Kid reply is paginated with LENS_TEXT and the view jumps to its first page', () => {
@@ -23,7 +23,7 @@ describe('Conversation (lens view)', () => {
     c.upsert([kid(13, long)], 'live')
     const v = c.view()
     expect(v.pages).toBeGreaterThan(2)
-    expect(v.body).toContain('Kid：这是一段')
+    expect(v.body).toContain('KK：这是一段')
     for (const page of c.pages()) expect(page.length).toBeLessThanOrEqual(LENS_TEXT.bodyLines)
     c.next()
     expect(c.view().page).toBe(v.page + 1)
@@ -36,7 +36,7 @@ describe('Conversation (lens view)', () => {
     const c = new Conversation()
     c.upsert([kid(1, 'a'), kid(2, 'b')], 'history')
     c.upsert([kid(2, 'b')], 'replay')
-    expect(c.view().body).toBe('Kid：a\nKid：b')
+    expect(c.view().body).toBe('KK：a\nKK：b')
   })
 
   it('pending turns show until the relay echoes their cid', () => {
@@ -132,7 +132,7 @@ describe('Conversation paging: fill-triggered, not timed', () => {
     const c = new Conversation({ now: () => 0 })
     c.upsert([kid(1, zi(50))], 'live')
     expect(c.revealing).toBe(true)
-    expect(c.view().body).toBe('Kid：')
+    expect(c.view().body).toBe('KK：')
   })
 
   it('(e) with the flag off, an all-at-once Kid reply shows in full from its page 1 and is never auto-walked', () => {
@@ -145,8 +145,8 @@ describe('Conversation paging: fill-triggered, not timed', () => {
     const v = c.view()
     expect(v.page).toBe(1)
     expect(v.pages).toBeGreaterThan(1)
-    expect(v.body).toContain('Kid：字')
-    expect(c.pages().flat().join('').replace(/^我：讲个故事Kid：/, '')).toBe(story)
+    expect(v.body).toContain('KK：字')
+    expect(c.pages().flat().join('').replace(/^我：讲个故事KK：/, '')).toBe(story)
     now += 10 * 60_000
     c.tick()
     expect(c.view()).toEqual(v)
@@ -173,10 +173,10 @@ describe('Progressive Kid reveal (function and class, flag forced on)', () => {
     const story = zi(600)
     c.upsert([kid(1, story)], 'live')
     expect(c.revealing).toBe(true)
-    expect(c.view()).toMatchObject({ body: 'Kid：', page: 1, pages: 1 })
+    expect(c.view()).toMatchObject({ body: 'KK：', page: 1, pages: 1 })
     now = 1000
     c.tick()
-    expect(c.view().body).toBe('Kid：' + zi(6))
+    expect(c.view().body).toBe('KK：' + zi(6))
     const flips: number[] = []
     let lastPage = 1
     while (c.revealing && now < 200_000) {
@@ -189,7 +189,7 @@ describe('Progressive Kid reveal (function and class, flag forced on)', () => {
     }
     expect(flips.length).toBeGreaterThanOrEqual(2)
     expect(c.revealing).toBe(false)
-    expect(c.pages().flat().join('')).toBe('Kid：' + story)
+    expect(c.pages().flat().join('')).toBe('KK：' + story)
 
     now = 0
     const d = new Conversation({ progressiveReveal: true, now: () => now })
@@ -200,7 +200,7 @@ describe('Progressive Kid reveal (function and class, flag forced on)', () => {
     expect(mid.pages).toBeLessThan(c.pages().length)
     expect(d.skipReveal()).toBe(true)
     expect(d.revealing).toBe(false)
-    expect(d.pages().flat().join('')).toBe('Kid：' + story)
+    expect(d.pages().flat().join('')).toBe('KK：' + story)
     expect(d.view().page).toBe(mid.page)
     d.next()
     expect(d.view().page).toBe(mid.page + 1)

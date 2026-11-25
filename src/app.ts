@@ -116,7 +116,7 @@ type Screen =
   | { kind: 'bg' }
 
 const MENU: Array<{ label: string; open?: () => Screen; action?: 'lang' | 'session' }> = [
-  { label: 'Kid (M1)', open: () => ({ kind: 'kid' }) },
+  { label: 'KK', open: () => ({ kind: 'kid' }) },
   { label: '语言', action: 'lang' },
   { label: '新对话（Slack 新话题）', action: 'session' },
   { label: 'Glyph test (CJK)', open: () => ({ kind: 'glyph', page: 0 }) },
@@ -191,7 +191,7 @@ const ERROR_TEXT: Record<string, string> = {
   'asr-empty': '没听清，这句没发出去',
   'asr-connect-failed': '转写服务连不上，这句没发出去',
   'asr-not-configured': 'relay 没配转写服务',
-  'kid-webhook-failed': '已发到 Slack，但没叫醒 Kid',
+  'kid-webhook-failed': '已发到 Slack，但没叫醒 KK',
   'slack-unreachable': 'Slack 连不上，稍后自动重发',
   SlackApiError: 'Slack 拒绝了这条，稍后重发',
   SlackConfigError: 'relay 的 Slack 配置有问题',
@@ -524,7 +524,7 @@ export class App {
   private pageName(): string {
     switch (this.screen.kind) {
       case 'kid':
-        return 'Kid'
+        return 'KK'
       case 'menu':
         return 'Menu'
       case 'glyph':
@@ -545,7 +545,7 @@ export class App {
 
   private kidStatus(): string {
     const st = this.relay.state
-    const parts = ['Kid', STATE_TEXT[st]]
+    const parts = ['KK', STATE_TEXT[st]]
     if (st === 'offline' && this.relayDetail) {
       const m = /retry in (\d+)s/.exec(this.relayDetail)
       if (m) parts[1] = `离线·${m[1]}秒后重连`
@@ -564,7 +564,7 @@ export class App {
   private kidBody(): string {
     if (this.relay.state === 'need-pair') return this.pairBody()
     const v = this.conv.view()
-    if (!v.pages) return ['按住说话，松开就发给 Kid。', 'Kid 的回复会显示在这里。', '', '上下滑动翻页，双击回菜单。', `识别语言：${ASR_LANG_LABEL[this.asrLang]}（菜单里切换）`].join('\n')
+    if (!v.pages) return ['按住说话，松开就发给 KK。', 'KK 的回复会显示在这里。', '', '上下滑动翻页，双击回菜单。', `识别语言：${ASR_LANG_LABEL[this.asrLang]}（菜单里切换）`].join('\n')
     return v.body
   }
 
@@ -576,7 +576,7 @@ export class App {
         return [
           `配对码：${p.code}`,
           '',
-          '请在 Slack 里，和 Kid 的私信中',
+          '请在 Slack 里，和 KK 的私信中',
           `亲手输入并发送：配对 ${p.code}`,
           '',
           `剩余 ${Math.floor(left / 60)}:${String(left % 60).padStart(2, '0')}${p.detail ? `  ${p.detail}` : ''}`,
@@ -673,7 +673,7 @@ export class App {
         return this.kidBody()
       case 'menu':
         return [
-          'Kid Glasses · 菜单（M0 测试页在下面）',
+          'KK Glasses · 菜单（M0 测试页在下面）',
           ...MENU.map((m, i) => `${i === s.cursor ? '>' : ' '} ${i + 1}. ${m.action === 'lang' ? `语言：${ASR_LANG_LABEL[this.asrLang]}（单击切换）` : m.label}`),
           `boot #${this.bootInfo.boot}  last: ${this.lastGesture}`,
         ].join('\n')
