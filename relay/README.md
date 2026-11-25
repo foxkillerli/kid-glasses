@@ -191,7 +191,7 @@ Each route fails closed when its secret is missing:
 
 **Resend without double posting.** The plugin keeps every `say` it has not seen acknowledged in a persisted outbox. After each reconnect, and after a page reload, it sends them again with the same `cid`.
 
-- The relay keeps `meta:cids` (at most 1000 entries, 24 h; the plugin drops unsent turns after 12 h). Every post runs through one queue, so concurrent duplicates also post once.
+- The relay keeps `meta:cids` for 24 h: at most 1000 entries, except that entries younger than 13 h are kept past that cap (hard cap 5000), so anything still in a plugin outbox (12 h) stays deduplicated. Every post runs through one queue, so concurrent duplicates also post once.
 - Before calling Slack, the relay marks the cid `sending`. The outcome then decides the next step:
   - **Success:** the mark becomes `posted`, atomically with the history entry.
   - **Definite refusal** (Slack answered `ok:false`, or a config error): the mark is removed, so a resend posts normally.

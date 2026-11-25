@@ -55,6 +55,8 @@ export const SESSION_IDLE_MS = 30 * 60 * 1000
 export const SEEN_CAP = 200
 export const CIDS_KEY = 'meta:cids'
 export const CID_CAP = 1000
+export const CID_HARD_CAP = 5000
+export const CID_PROTECT_MS = 13 * 60 * 60 * 1000
 export const CID_TTL_MS = 24 * 60 * 60 * 1000
 export const PENDING_AUDIO_CAP = 100
 export const VOICE_PENDING_KEY = 'meta:voice-pending'
@@ -308,8 +310,15 @@ export class HubCore {
     return out
   }
 
+  private trimCids(list: CidEntry[]): CidEntry[] {
+    if (list.length <= CID_CAP) return list
+    const now = this.deps.now()
+    const cut = list.length - CID_CAP
+    return list.filter((c, i) => i >= cut || now - c.at < CID_PROTECT_MS).slice(-CID_HARD_CAP)
+  }
+
   private async putCids(list: CidEntry[]): Promise<void> {
-    await this.deps.storage.put(CIDS_KEY, list.slice(-CID_CAP))
+    await this.deps.storage.put(CIDS_KEY, this.trimCids(list))
   }
 
   private async postNow(raw: string, cid?: string, voice = false): Promise<HistoryItem | null> {
@@ -401,7 +410,7 @@ export class HubCore {
         ...(cid ? { cid } : {}),
         at: this.deps.now(),
       },
-      (seq: number): Record<string, unknown> => (cid ? { [CIDS_KEY]: [...others, { cid, seq, at: this.deps.now(), state: 'posted' as const, slackTs: posted.ts }].slice(-CID_CAP) } : {}),
+      (seq: number): Record<string, unknown> => (cid ? { [CIDS_KEY]: this.trimCids([...others, { cid, seq, at: this.deps.now(), state: 'posted' as const, slackTs: posted.ts }]) } : {}),
     )
     this.log(`say posted seq=${item.seq} len=${item.text.length}${cid ? ' cid' : ''}${reconciled ? ' reconciled' : ''}`)
     this.broadcast({ t: 'posted', seq: item.seq, text: item.text, ...(cid ? { cid } : {}), ...(reconciled ? { dup: true } : {}) })

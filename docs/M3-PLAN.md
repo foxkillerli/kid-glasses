@@ -63,7 +63,7 @@ Same recipe as M2: the relay with `keep_bindings: ["secret_text"]` and no migrat
   - Reconcile refuses to guess when Slack says `has_more` without a cursor.
   - Reconcile compares text with Slack's link formatting (`<url|label>`, `<mailto:…>`) removed.
   - The plugin flushes its outbox after `replay.done`, not at `auth.ok`, so a post it missed the ack for is acked by the replay first (5 s fallback if no `replay.done` arrives).
-  - **Residual, documented:** a duplicate is still possible when all of these hold: the phone holds a `say` that did reach Slack but whose ack it missed, the relay then takes more than 1000 newer posts (the cid record cap) and 500 (history), and the phone reconnects within its 12 h outbox window. Closing that needs per-cid storage keys and is left for a later change.
+  - The cid record keeps every entry younger than 13 h (the plugin's 12 h outbox window plus margin) even past the 1000-entry cap, up to a hard cap of 5000. A stale unacked `say` that reconnects within 12 h is therefore still deduplicated unless more than 5000 posts happened in those 12 h.
 - **FIX_NEXT fixed:**
   - M3-02: the pending text fits the device's UTF-16 limit, and a permanent refusal on a resend clears the pending entry.
   - M3-03: reconcile excludes every glasses post in recent history (four pages of 50), including ones sent without a cid.

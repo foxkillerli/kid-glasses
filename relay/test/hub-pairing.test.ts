@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DISABLED_FAST_LANE } from '../src/fast-lane'
-import { CIDS_KEY, CID_CAP, HubCore, RECONCILE_SETTLE_MS, VOICE_PENDING_CAP, VOICE_PENDING_KEY, VOICE_PENDING_TTL_MS, type HubDeps } from '../src/hub-core'
+import { CIDS_KEY, CID_CAP, CID_HARD_CAP, CID_PROTECT_MS, HubCore, RECONCILE_SETTLE_MS, VOICE_PENDING_CAP, VOICE_PENDING_KEY, VOICE_PENDING_TTL_MS, type HubDeps } from '../src/hub-core'
 import { Pairing } from '../src/pairing'
 import { DeepgramUpgradeError } from '../src/deepgram'
 import { KidDmClient, SlackApiError, SlackConfigError } from '../src/slack-client'
@@ -82,7 +82,22 @@ describe('say dedupe by cid', () => {
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'a', cid: CID }))
     expect(posts).toHaveLength(2)
     for (let i = 0; i < CID_CAP + 5; i++) await core.sayFromGlasses('x', `cid-${String(i).padStart(8, '0')}`)
+    expect(((await storage.get<unknown[]>(CIDS_KEY)) ?? []).length).toBe(CID_CAP + 6)
+    advance(CID_PROTECT_MS)
+    await core.sayFromGlasses('x', 'cid-after-protect')
     expect(((await storage.get<unknown[]>(CIDS_KEY)) ?? []).length).toBe(CID_CAP)
+  })
+
+  it('cids younger than the plugin outbox window survive the 1000 cap (up to a hard cap), so a stale unacked say is still deduped', async () => {
+    const { core, device, posts, advance } = setup()
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '只发一次', cid: CID }))
+    for (let i = 0; i < CID_CAP + 10; i++) {
+      advance(2_000)
+      await core.sayFromGlasses('别的', `cid-other-${String(i).padStart(6, '0')}`)
+    }
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '只发一次', cid: CID }))
+    expect(posts.filter(p => p === '〔眼镜〕只发一次')).toHaveLength(1)
+    expect(CID_HARD_CAP).toBeGreaterThan(CID_CAP)
   })
 
   it('replayed glasses items carry their cid, so a reconnecting client can clear its outbox', async () => {
