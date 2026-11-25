@@ -8,7 +8,7 @@ import { Pairing } from '../src/pairing'
 import { KidDmClient } from '../src/slack-client'
 import { slackSignature } from '../src/slack-verify'
 import type { Env } from '../src/env'
-import { FakeDevice, FakeStorage, flush, FakeTimers } from './fakes'
+import { FakeAsr, FakeDevice, FakeStorage, flush, FakeTimers } from './fakes'
 
 const S = {
   slackToken: ['xoxp', 'SENTINELTOKEN', '1111'].join('-'),
@@ -107,6 +107,54 @@ describe('logs never contain secrets, ids that identify channels, or message tex
     expect(lines.some(l => l.includes('device auth rejected'))).toBe(true)
     expect(lines.some(l => l.includes('asr connect failed'))).toBe(true)
     assertClean()
+  })
+
+  it('M3: a voice turn whose Slack post hangs, the pending transcript, its resend with paginated reconcile, and new session', async () => {
+    let hang = true
+    const slack = (async (url: RequestInfo | URL, init?: RequestInit) => {
+      const u = String(url)
+      if (u.includes('auth.test')) return Response.json({ ok: true, user_id: FOX })
+      if (u.includes('conversations.')) {
+        const page = new URL(u).searchParams.get('cursor')
+        return Response.json({ ok: true, messages: [{ ts: '1.1', user: 'UOTHER01', text: S.text }], response_metadata: { next_cursor: page ? '' : `cur-${S.channel}` } })
+      }
+      if (hang) return new Promise<Response>(() => {})
+      return Response.json({ ok: true, ts: '1700000000.000300', channel: S.channel, echo: (init?.body as string) ?? '' })
+    }) as typeof fetch
+    const storage = new FakeStorage()
+    const device = new FakeDevice()
+    const asr = new FakeAsr()
+    const core = new HubCore({
+      storage,
+      sockets: () => [device],
+      deviceToken: S.deviceToken,
+      slack: new KidDmClient(S.slackToken, S.channel, slack, 20),
+      asr: { connect: async () => asr },
+      timers: new FakeTimers(),
+      fastLane: DISABLED_FAST_LANE,
+      kidWebhook: new KidWebhookClient(S.webhookUrl, S.webhookSecret, { fetchFn: async () => new Response('ok'), sleep: async () => {} }),
+      pairing: new Pairing({ storage, now: () => Date.now() }),
+      now: () => Date.now(),
+      log: m => relayLog(`hub ${m}`),
+    })
+    const cid = 'cid-guard-voice1'
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid, lang: 'zh' }))
+    await core.onDeviceMessage(device, new Uint8Array(3200))
+    asr.result(S.text, false)
+    asr.result(S.text, true, { start: 0, duration: 0.1 })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    asr.result('', true, { fromFinalize: true })
+    await core.turnsSettled
+    expect(device.of('turn.pending')).toHaveLength(1)
+    hang = false
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'hello', lastSeq: 0 }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid, text: S.text }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'session.new' }))
+    expect(device.of('posted')).toHaveLength(1)
+    expect(lines.some(l => l.includes('asr done reason=finalize'))).toBe(true)
+    expect(lines.some(l => l.includes('voice pending kept n=1'))).toBe(true)
+    expect(lines.some(l => l.includes('slack post failed SlackTimeoutError'))).toBe(true)
+    assertClean([cid])
   })
 
   it('pairing: codes, pair ids and minted tokens never reach the log', async () => {

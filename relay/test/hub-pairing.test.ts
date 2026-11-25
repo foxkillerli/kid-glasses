@@ -1,9 +1,9 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DISABLED_FAST_LANE } from '../src/fast-lane'
-import { CIDS_KEY, CID_CAP, HubCore, type HubDeps } from '../src/hub-core'
+import { CIDS_KEY, CID_CAP, HubCore, VOICE_PENDING_CAP, VOICE_PENDING_KEY, VOICE_PENDING_TTL_MS, type HubDeps } from '../src/hub-core'
 import { Pairing } from '../src/pairing'
-import { SlackApiError } from '../src/slack-client'
 import { DeepgramUpgradeError } from '../src/deepgram'
+import { KidDmClient, SlackApiError, SlackConfigError } from '../src/slack-client'
 import { FakeAsr, FakeDevice, FakeStorage, flush, FakeTimers } from './fakes'
 
 const FOX = 'UFOX0001'
@@ -171,6 +171,124 @@ describe('M2 voice turn options', () => {
     await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
     expect(device.of('error')).toEqual([expect.objectContaining({ code: 'asr-rejected', cid: CID })])
     expect(core.recording).toBe(false)
+  })
+})
+
+describe('M3-3 recoverable voice transcripts', () => {
+  async function voiceTurn(core: HubCore, device: FakeDevice, asr: FakeAsr, text: string, cid = CID) {
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid }))
+    asr.result(text, true, { start: 0, duration: 0.1 })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    asr.result('', true, { fromFinalize: true })
+    await core.turnsSettled
+  }
+
+  it('a transcript whose Slack post fails transiently is kept, offered as turn.pending now and after hello, and cleared once a say with the same cid posts', async () => {
+    let fail = true
+    const posted: string[] = []
+    const asr = new FakeAsr()
+    const findOwnPost = vi.fn(async () => null)
+    const { core, device, storage } = setup({
+      asr: { connect: async () => asr },
+      slack: {
+        selfUserId: async () => FOX,
+        findOwnPost,
+        postToKid: async (text: string) => {
+          if (fail) throw new TypeError('network down')
+          posted.push(text)
+          return { ts: '1700000000.000900', channel: 'D0123ABCDEF' }
+        },
+      },
+    })
+    await voiceTurn(core, device, asr, '帮我记一下')
+    expect(device.of('error')).toEqual([expect.objectContaining({ code: 'slack-unreachable', cid: CID })])
+    expect(device.of('turn.pending')).toEqual([{ t: 'turn.pending', cid: CID, text: '帮我记一下' }])
+    expect(await storage.get(VOICE_PENDING_KEY)).toEqual([expect.objectContaining({ cid: CID, text: '帮我记一下' })])
+    const later = new FakeDevice()
+    await core.onDeviceMessage(later, JSON.stringify({ t: 'hello', lastSeq: 0 }))
+    expect(later.of('turn.pending')).toEqual([{ t: 'turn.pending', cid: CID, text: '帮我记一下' }])
+    fail = false
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid: CID, text: '帮我记一下' }))
+    expect(findOwnPost).toHaveBeenCalledTimes(1)
+    expect(posted).toEqual(['〔眼镜〕帮我记一下'])
+    expect(device.of('posted')).toEqual([expect.objectContaining({ cid: CID })])
+    expect(await storage.get(VOICE_PENDING_KEY)).toEqual([])
+    const after = new FakeDevice()
+    await core.onDeviceMessage(after, JSON.stringify({ t: 'hello', lastSeq: 0 }))
+    expect(after.of('turn.pending')).toEqual([])
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid: CID, text: '帮我记一下' }))
+    expect(posted).toHaveLength(1)
+  })
+
+  it('a reconciled resend (the first attempt had in fact reached Slack) also clears the pending transcript and posts nothing new', async () => {
+    let calls = 0
+    const asr = new FakeAsr()
+    const { core, device, storage } = setup({
+      asr: { connect: async () => asr },
+      slack: {
+        selfUserId: async () => FOX,
+        findOwnPost: async () => ({ ts: '1700000000.000700', channel: 'D0123ABCDEF' }),
+        postToKid: async () => {
+          calls++
+          throw new TypeError('timeout after send')
+        },
+      },
+    })
+    await voiceTurn(core, device, asr, '已经到了')
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid: CID, text: '已经到了' }))
+    expect(calls).toBe(1)
+    expect(device.of('posted')).toEqual([expect.objectContaining({ cid: CID, dup: true })])
+    expect(await storage.get(VOICE_PENDING_KEY)).toEqual([])
+  })
+
+  it('a permanent refusal is not kept; typed say failures are never turned into pending voice', async () => {
+    const asr = new FakeAsr()
+    const { core, device, storage } = setup({
+      asr: { connect: async () => asr },
+      slack: { selfUserId: async () => FOX, postToKid: async () => Promise.reject(new SlackConfigError('bad config')) },
+    })
+    await voiceTurn(core, device, asr, '不会保存')
+    expect(device.of('turn.pending')).toEqual([])
+    const s2 = setup({ slack: { selfUserId: async () => FOX, postToKid: async () => Promise.reject(new TypeError('down')) } })
+    await s2.core.onDeviceMessage(s2.device, JSON.stringify({ t: 'say', cid: CID, text: '打字的' }))
+    expect(s2.device.of('turn.pending')).toEqual([])
+    expect(await storage.get(VOICE_PENDING_KEY)).toBeUndefined()
+  })
+
+  it('pending transcripts are capped and expire after 12 h', async () => {
+    const asr = new FakeAsr()
+    const { core, device, storage, advance } = setup({
+      asr: { connect: async () => asr },
+      slack: { selfUserId: async () => FOX, postToKid: async () => Promise.reject(new TypeError('down')) },
+    })
+    for (let i = 0; i < VOICE_PENDING_CAP + 2; i++) await voiceTurn(core, device, asr, `第${i}句`, `cid-voice-${String(i).padStart(4, '0')}`)
+    const list = (await storage.get<Array<{ cid: string }>>(VOICE_PENDING_KEY)) ?? []
+    expect(list).toHaveLength(VOICE_PENDING_CAP)
+    expect(list[0].cid).toBe('cid-voice-0002')
+    advance(VOICE_PENDING_TTL_MS)
+    const later = new FakeDevice()
+    await core.onDeviceMessage(later, JSON.stringify({ t: 'hello', lastSeq: 0 }))
+    expect(later.of('turn.pending')).toEqual([])
+  })
+
+  it('M3-1: a hung Slack API call times out, so the turn queue keeps moving', async () => {
+    let hang = true
+    const posts: string[] = []
+    const fetchFn = vi.fn(async (url: string, init: RequestInit) => {
+      if (url.includes('auth.test')) return Response.json({ ok: true, user_id: FOX })
+      if (hang) return new Promise<Response>(() => {})
+      posts.push(JSON.parse(init.body as string).text)
+      return Response.json({ ok: true, ts: '1700000000.000800', channel: 'D0123ABCDEF' })
+    })
+    const asr = new FakeAsr()
+    const asr2 = new FakeAsr()
+    const queue = [asr, asr2]
+    const { core, device } = setup({ asr: { connect: async () => queue.shift() as FakeAsr }, slack: new KidDmClient(['xoxp', 'fake', 'tok'].join('-'), 'D0123ABCDEF', fetchFn, 20) })
+    await voiceTurn(core, device, asr, '第一句')
+    expect(device.of('error')).toEqual([expect.objectContaining({ code: 'slack-unreachable', cid: CID })])
+    hang = false
+    await voiceTurn(core, device, asr2, '第二句', 'cid-second-1')
+    expect(posts).toEqual(['〔眼镜〕第二句'])
   })
 })
 

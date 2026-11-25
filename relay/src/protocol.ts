@@ -27,6 +27,7 @@ export type ServerMessage =
   | { t: 'posted'; seq: number; text: string; cid?: string; dup?: boolean }
   | { t: 'kid-webhook'; seq: number; result: 'ok' | 'skipped' | 'failed'; status: number | null }
   | { t: 'history'; items: WireItem[]; more: boolean }
+  | { t: 'turn.pending'; cid: string; text: string }
   | { t: 'error'; code: string; message: string; cid?: string }
 
 export interface WireItem {

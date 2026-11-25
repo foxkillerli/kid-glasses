@@ -6,7 +6,7 @@ import type { KidWebhook } from './kid-webhook'
 import { errorName } from './log'
 import { PAIR_CODE_RE, PAIR_ID_RE, type Pairing } from './pairing'
 import { HistoryStore, PAGE_MAX, type HistoryItem, type KvStorage } from './history'
-import { parseClientMessage, type ServerMessage, type WireItem } from './protocol'
+import { MAX_SAY_CHARS, parseClientMessage, type ServerMessage, type WireItem } from './protocol'
 import { MAX_OUTGOING_CHARS, clip, cleanText, fromSlack, isFromGlasses, toSlack } from './sanitize'
 import type { KidMessage } from './slack-events'
 import { ChannelNotAllowedError, SlackApiError, SlackConfigError, type PostResult } from './slack-client'
@@ -57,6 +57,9 @@ export const CIDS_KEY = 'meta:cids'
 export const CID_CAP = 1000
 export const CID_TTL_MS = 24 * 60 * 60 * 1000
 export const PENDING_AUDIO_CAP = 100
+export const VOICE_PENDING_KEY = 'meta:voice-pending'
+export const VOICE_PENDING_CAP = 20
+export const VOICE_PENDING_TTL_MS = 12 * 60 * 60 * 1000
 export const CLOSE_UNAUTHORIZED = 4401
 export const CLOSE_NOT_CONFIGURED = 4503
 
@@ -64,6 +67,12 @@ interface VoiceTurn {
   asr: AsrTurn
   cid: string | undefined
   owner: DeviceSocket
+}
+
+interface PendingVoice {
+  cid: string
+  text: string
+  at: number
 }
 
 interface CidEntry {
@@ -189,6 +198,7 @@ export class HubCore {
           await this.replay(ws, m.lastSeq, lastSeq)
           this.send(ws, { t: 'replay.done', upTo: lastSeq })
         }
+        for (const p of await this.pendingVoice()) this.send(ws, { t: 'turn.pending', cid: p.cid, text: p.text })
         return
       }
       case 'ping':
@@ -247,21 +257,44 @@ export class HubCore {
     }
   }
 
-  sayFromGlasses(raw: string, cid?: string): Promise<HistoryItem | null> {
-    return this.enqueue(() => this.postNow(raw, cid))
+  sayFromGlasses(raw: string, cid?: string, voice = false): Promise<HistoryItem | null> {
+    return this.enqueue(() => this.postNow(raw, cid, voice))
+  }
+
+  private async pendingVoice(): Promise<PendingVoice[]> {
+    const now = this.deps.now()
+    return ((await this.deps.storage.get<PendingVoice[]>(VOICE_PENDING_KEY)) ?? []).filter(p => now - p.at < VOICE_PENDING_TTL_MS)
+  }
+
+  private async keepPendingVoice(cid: string, raw: string): Promise<void> {
+    const text = clip(cleanText(raw), MAX_SAY_CHARS)
+    if (!text) return
+    const list = [...(await this.pendingVoice()).filter(p => p.cid !== cid), { cid, text, at: this.deps.now() }].slice(-VOICE_PENDING_CAP)
+    await this.deps.storage.put(VOICE_PENDING_KEY, list)
+    this.log(`voice pending kept n=${list.length}`)
+    this.broadcast({ t: 'turn.pending', cid, text })
+  }
+
+  private async dropPendingVoice(cid: string | undefined): Promise<void> {
+    if (!cid) return
+    const all = (await this.deps.storage.get<PendingVoice[]>(VOICE_PENDING_KEY)) ?? []
+    if (!all.some(p => p.cid === cid)) return
+    await this.deps.storage.put(VOICE_PENDING_KEY, (await this.pendingVoice()).filter(p => p.cid !== cid))
+    this.log('voice pending cleared')
   }
 
   private async putCids(list: CidEntry[]): Promise<void> {
     await this.deps.storage.put(CIDS_KEY, list.slice(-CID_CAP))
   }
 
-  private async postNow(raw: string, cid?: string): Promise<HistoryItem | null> {
+  private async postNow(raw: string, cid?: string, voice = false): Promise<HistoryItem | null> {
     const cids = cid ? await this.liveCids() : []
     const known = cid ? cids.find(c => c.cid === cid) : undefined
     const others = cids.filter(c => c !== known)
     if (cid && known?.state === 'posted' && known.seq !== undefined) {
       const prior = await this.history.get(known.seq)
       this.log(`say duplicate cid seq=${known.seq}`)
+      await this.dropPendingVoice(cid)
       this.broadcast({ t: 'posted', seq: known.seq, text: prior?.text ?? '', cid, dup: true })
       return prior ?? null
     }
@@ -299,6 +332,8 @@ export class HubCore {
       const definite = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError || e instanceof SlackApiError
       if (cid) await this.putCids(definite ? others : [...others, { cid, state: 'uncertain', at: this.deps.now(), threadTs: session.threadTs, session: session.id }])
       this.broadcast({ t: 'error', code: definite ? e.name : 'slack-unreachable', message: definite ? e.message : 'could not reach Slack', ...(cid ? { cid } : {}) })
+      const permanent = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError
+      if (voice && cid && !permanent) await this.keepPendingVoice(cid, raw)
       return null
     }
     return this.recordPosted(raw, cid, others, session, session.threadTs, posted, false)
@@ -313,6 +348,7 @@ export class HubCore {
     posted: PostResult,
     reconciled: boolean,
   ): Promise<HistoryItem> {
+    await this.dropPendingVoice(cid)
     const current = await this.deps.storage.get<Session>(SESSION_KEY)
     const sameSession = current?.id === session.id
     const threadTs = postedThreadTs ?? posted.ts
@@ -525,7 +561,7 @@ export class HubCore {
       },
     })
     this.turn = entry
-    this.turnChain = this.turnChain.then(() => result).then(text => (text ? this.sayFromGlasses(text, cid) : null)).catch(() => null)
+    this.turnChain = this.turnChain.then(() => result).then(text => (text ? this.sayFromGlasses(text, cid, true) : null)).catch(() => null)
     this.log(`asr start lang=${lang}`)
     await entry.asr.start()
   }
