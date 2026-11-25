@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from 'vitest'
 import { DISABLED_FAST_LANE } from '../src/fast-lane'
-import { CIDS_KEY, CID_CAP, HubCore, VOICE_PENDING_CAP, VOICE_PENDING_KEY, VOICE_PENDING_TTL_MS, type HubDeps } from '../src/hub-core'
+import { CIDS_KEY, CID_CAP, HubCore, RECONCILE_SETTLE_MS, VOICE_PENDING_CAP, VOICE_PENDING_KEY, VOICE_PENDING_TTL_MS, type HubDeps } from '../src/hub-core'
 import { Pairing } from '../src/pairing'
 import { DeepgramUpgradeError } from '../src/deepgram'
 import { KidDmClient, SlackApiError, SlackConfigError } from '../src/slack-client'
@@ -188,7 +188,7 @@ describe('M3-3 recoverable voice transcripts', () => {
     const posted: string[] = []
     const asr = new FakeAsr()
     const findOwnPost = vi.fn(async () => null)
-    const { core, device, storage } = setup({
+    const { core, device, storage, advance } = setup({
       asr: { connect: async () => asr },
       slack: {
         selfUserId: async () => FOX,
@@ -208,6 +208,7 @@ describe('M3-3 recoverable voice transcripts', () => {
     await core.onDeviceMessage(later, JSON.stringify({ t: 'hello', lastSeq: 0 }))
     expect(later.of('turn.pending')).toEqual([{ t: 'turn.pending', cid: CID, text: '帮我记一下' }])
     fail = false
+    advance(RECONCILE_SETTLE_MS)
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid: CID, text: '帮我记一下' }))
     expect(findOwnPost).toHaveBeenCalledTimes(1)
     expect(posted).toEqual(['〔眼镜〕帮我记一下'])
@@ -289,6 +290,84 @@ describe('M3-3 recoverable voice transcripts', () => {
     hang = false
     await voiceTurn(core, device, asr2, '第二句', 'cid-second-1')
     expect(posts).toEqual(['〔眼镜〕第二句'])
+  })
+})
+
+describe('M3 round 2: no double posts, original thread', () => {
+  it('an internal_error from Slack is treated as uncertain: the resend reconciles and finds the first post', async () => {
+    let calls = 0
+    const { core, device, advance } = setup({
+      slack: {
+        selfUserId: async () => FOX,
+        postToKid: async () => {
+          calls++
+          throw new SlackApiError('internal_error')
+        },
+        findOwnPost: async () => ({ ts: '1700000000.000555', channel: 'D0123ABCDEF' }),
+      },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '写进去了', cid: CID }))
+    expect(device.of('error')).toEqual([expect.objectContaining({ code: 'slack-unreachable', cid: CID })])
+    advance(RECONCILE_SETTLE_MS)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '写进去了', cid: CID }))
+    expect(calls).toBe(1)
+    expect(device.of('posted')).toEqual([expect.objectContaining({ cid: CID, dup: true })])
+  })
+
+  it('reconcile never matches an earlier post recorded without a cid', async () => {
+    let n = 0
+    const excluded: string[][] = []
+    const { core, device, advance } = setup({
+      slack: {
+        selfUserId: async () => FOX,
+        postToKid: async () => {
+          n++
+          if (n === 2) throw new TypeError('lost')
+          return { ts: `1700000000.00${n}`, channel: 'D0123ABCDEF' }
+        },
+        findOwnPost: async (_t: string, _th: string | null, _s: number, exclude?: Set<string>) => {
+          excluded.push([...(exclude ?? [])])
+          return exclude?.has('1700000000.001') ? null : { ts: '1700000000.001', channel: 'D0123ABCDEF' }
+        },
+      },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '同一句' }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '同一句', cid: CID }))
+    advance(RECONCILE_SETTLE_MS)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '同一句', cid: CID }))
+    expect(excluded[0]).toContain('1700000000.001')
+    expect(n).toBe(3)
+  })
+
+  it('a pending voice resend goes to the thread of its first attempt, even after 新对话', async () => {
+    const threads: Array<string | null> = []
+    let fail = true
+    let n = 0
+    const asr = new FakeAsr()
+    const { core, device, advance } = setup({
+      asr: { connect: async () => asr },
+      slack: {
+        selfUserId: async () => FOX,
+        findOwnPost: async () => null,
+        postToKid: async (_text: string, threadTs: string | null) => {
+          threads.push(threadTs)
+          if (fail && n > 0) throw new SlackApiError('ratelimited', 1)
+          n++
+          return { ts: `1700000000.10${n}`, channel: 'D0123ABCDEF' }
+        },
+      },
+    })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '开个话题', cid: 'cid-thread-a01' }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    asr.result('话题A里的', true, { start: 0, duration: 0.1 })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    asr.result('', true, { fromFinalize: true })
+    await core.turnsSettled
+    advance(RECONCILE_SETTLE_MS)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'session.new' }))
+    fail = false
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '话题A里的', cid: CID }))
+    expect(threads).toEqual([null, '1700000000.101', '1700000000.101'])
   })
 })
 
@@ -407,10 +486,10 @@ describe('review fixes: uncertain Slack posts, evicted devices, cancel, replay m
     expect(device.of('posted')).toEqual([{ t: 'posted', seq: 1, text: 'x', cid: CID }])
   })
 
-  it('F01: if the earlier attempt never reached Slack, the resend posts once', async () => {
+  it('F01: if the earlier attempt never reached Slack, the resend waits out the settle window, then posts once', async () => {
     const posts: string[] = []
     let first = true
-    const { core, device } = setup({
+    const { core, device, advance } = setup({
       slack: {
         selfUserId: async () => FOX,
         postToKid: async (text: string) => {
@@ -425,6 +504,10 @@ describe('review fixes: uncertain Slack posts, evicted devices, cancel, replay m
       },
     })
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'y', cid: CID }))
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'y', cid: CID }))
+    expect(posts).toHaveLength(0)
+    expect(device.of('error').map(e => e.code)).toEqual(['slack-unreachable', 'slack-unreachable'])
+    advance(RECONCILE_SETTLE_MS)
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: 'y', cid: CID }))
     expect(posts).toHaveLength(1)
   })
@@ -511,7 +594,7 @@ describe('review round 2 fixes', () => {
   it('F01-A: reconcile ignores Slack messages already recorded for another cid with the same text', async () => {
     const posts: string[] = []
     let calls = 0
-    const { core, device } = setup({
+    const { core, device, advance } = setup({
       slack: {
         selfUserId: async () => FOX,
         postToKid: async (text: string) => {
@@ -526,6 +609,7 @@ describe('review round 2 fixes', () => {
     })
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '好的', cid: 'cid-first-0001' }))
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '好的', cid: 'cid-second-002' }))
+    advance(RECONCILE_SETTLE_MS)
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', text: '好的', cid: 'cid-second-002' }))
     expect(posts).toHaveLength(2)
     expect(device.of('posted').map(p => [p.cid, p.seq])).toEqual([

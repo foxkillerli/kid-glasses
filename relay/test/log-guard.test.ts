@@ -124,6 +124,7 @@ describe('logs never contain secrets, ids that identify channels, or message tex
     const storage = new FakeStorage()
     const device = new FakeDevice()
     const asr = new FakeAsr()
+    let now = Date.now()
     const core = new HubCore({
       storage,
       sockets: () => [device],
@@ -134,7 +135,7 @@ describe('logs never contain secrets, ids that identify channels, or message tex
       fastLane: DISABLED_FAST_LANE,
       kidWebhook: new KidWebhookClient(S.webhookUrl, S.webhookSecret, { fetchFn: async () => new Response('ok'), sleep: async () => {} }),
       pairing: new Pairing({ storage, now: () => Date.now() }),
-      now: () => Date.now(),
+      now: () => now,
       log: m => relayLog(`hub ${m}`),
     })
     const cid = 'cid-guard-voice1'
@@ -147,6 +148,7 @@ describe('logs never contain secrets, ids that identify channels, or message tex
     await core.turnsSettled
     expect(device.of('turn.pending')).toHaveLength(1)
     hang = false
+    now += 31_000
     await core.onDeviceMessage(device, JSON.stringify({ t: 'hello', lastSeq: 0 }))
     await core.onDeviceMessage(device, JSON.stringify({ t: 'say', cid, text: S.text }))
     await core.onDeviceMessage(device, JSON.stringify({ t: 'session.new' }))

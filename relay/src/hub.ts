@@ -1,8 +1,8 @@
 import { buildListenUrl, connectDeepgram, listenOptionsFor } from './deepgram'
-import { AUTH_ALARM_SLACK_MS, AUTH_TIMEOUT_FRAME, AUTH_TIMEOUT_MS, sweepUnauthed, type SocketAttachment } from './device-auth'
+import { AUTH_ALARM_SLACK_MS, AUTH_TIMEOUT_FRAME, AUTH_TIMEOUT_MS, CLOSE_AUTH_TIMEOUT, sweepUnauthed, type SocketAttachment } from './device-auth'
 import type { Env } from './env'
 import { fastLaneFor } from './fast-lane'
-import { CLOSE_UNAUTHORIZED, HubCore, isAuthed, type AsrSocket } from './hub-core'
+import { HubCore, isAuthed, type AsrSocket } from './hub-core'
 import type { KidMessage } from './slack-events'
 import { KidDmClient } from './slack-client'
 import { KidWebhookClient, kidWebhookConfigured } from './kid-webhook'
@@ -112,7 +112,7 @@ export class RelayHub implements DurableObject {
       } catch (err) {
         relayLog(`auth timeout notice failed ${errorName(err)}`)
       }
-      closeReply(ws, CLOSE_UNAUTHORIZED, 'auth timeout')
+      closeReply(ws, CLOSE_AUTH_TIMEOUT, 'auth timeout')
     }
     if (sweep.expired.length) relayLog(`auth timeout closed=${sweep.expired.length}`)
     if (sweep.nextAlarmAt !== null) await this.state.storage.setAlarm(sweep.nextAlarmAt)

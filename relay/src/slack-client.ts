@@ -31,6 +31,15 @@ export class SlackTimeoutError extends Error {
 
 export const SLACK_TIMEOUT_MS = 10_000
 export const RECONCILE_MAX_PAGES = 5
+export const UNCERTAIN_SLACK_ERRORS: ReadonlySet<string> = new Set(['internal_error', 'fatal_error', 'request_timeout', 'service_unavailable'])
+
+export function slackErrorIsUncertain(code: string): boolean {
+  return UNCERTAIN_SLACK_ERRORS.has(code) || /^http_5\d\d$/.test(code)
+}
+
+export function normalizeSlackText(t: string): string {
+  return t.replace(/<mailto:([^|>]+)\|[^>]*>/g, '$1').replace(/<((?:https?|ftp):\/\/[^|>]+)(?:\|[^>]*)?>/g, '$1')
+}
 
 export interface PostResult {
   ts: string
@@ -159,12 +168,17 @@ export class KidDmClient {
         error?: string
         messages?: Array<{ ts?: string; user?: string; text?: string }>
         response_metadata?: { next_cursor?: string }
+        has_more?: boolean
       }
       if (!data.ok) throw new SlackApiError(data.error ?? `http_${res.status}`)
-      const hit = (data.messages ?? []).find(m => m.user === self && m.text === text && typeof m.ts === 'string' && !excludeTs.has(m.ts))
+      const want = normalizeSlackText(text)
+      const hit = (data.messages ?? []).find(m => m.user === self && typeof m.text === 'string' && normalizeSlackText(m.text) === want && typeof m.ts === 'string' && !excludeTs.has(m.ts))
       if (hit) return { ts: hit.ts as string, channel }
       cursor = typeof data.response_metadata?.next_cursor === 'string' ? data.response_metadata.next_cursor : ''
-      if (!cursor) return null
+      if (!cursor) {
+        if (data.has_more) throw new SlackApiError('reconcile_incomplete')
+        return null
+      }
     }
     throw new SlackApiError('reconcile_too_many_pages')
   }

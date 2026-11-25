@@ -4,6 +4,7 @@ export const DEVICE_PROTOCOL = 'kg.v1'
 export const MIN_DEVICE_TOKEN_LENGTH = 32
 export const AUTH_TIMEOUT_MS = 10_000
 export const AUTH_ALARM_SLACK_MS = 100
+export const CLOSE_AUTH_TIMEOUT = 4408
 export const MAX_TOKEN_LENGTH = 256
 
 export function deviceTokenConfigured(token: string | undefined): token is string {

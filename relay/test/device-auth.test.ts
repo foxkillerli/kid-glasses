@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { AUTH_ALARM_SLACK_MS, AUTH_TIMEOUT_FRAME, AUTH_TIMEOUT_MS, checkDeviceToken, deviceTokenConfigured, offeredDeviceProtocol, sweepUnauthed } from '../src/device-auth'
+import { AUTH_ALARM_SLACK_MS, AUTH_TIMEOUT_FRAME, CLOSE_AUTH_TIMEOUT, AUTH_TIMEOUT_MS, checkDeviceToken, deviceTokenConfigured, offeredDeviceProtocol, sweepUnauthed } from '../src/device-auth'
 
 const TOKEN = 'a'.repeat(40)
 
@@ -52,5 +52,6 @@ describe('M3-2 unauthenticated socket sweep', () => {
 
   it('the timeout notice is an error frame with no secrets in it', () => {
     expect(JSON.parse(AUTH_TIMEOUT_FRAME)).toMatchObject({ t: 'error', code: 'auth-timeout' })
+    expect(CLOSE_AUTH_TIMEOUT).toBe(4408)
   })
 })

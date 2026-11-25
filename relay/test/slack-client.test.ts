@@ -1,5 +1,5 @@
 import { describe, expect, it, vi } from 'vitest'
-import { ChannelNotAllowedError, KidDmClient, RECONCILE_MAX_PAGES, SlackApiError, SlackConfigError, SlackTimeoutError } from '../src/slack-client'
+import { ChannelNotAllowedError, KidDmClient, RECONCILE_MAX_PAGES, SlackApiError, SlackConfigError, SlackTimeoutError, slackErrorIsUncertain } from '../src/slack-client'
 
 const KID = 'D0123ABCDEF'
 const TOKEN = ['xoxp', 'fake', 'token'].join('-')
@@ -169,5 +169,24 @@ describe('M3-1 Slack deadlines and M3-4 reconcile pagination', () => {
     )
     await expect(new KidDmClient(TOKEN, KID, endless, 1000).findOwnPost('t', null, 1)).rejects.toMatchObject({ code: 'reconcile_too_many_pages' })
     expect(endless.mock.calls.filter(([u]) => String(u).includes('conversations.history'))).toHaveLength(RECONCILE_MAX_PAGES)
+  })
+})
+
+describe('M3 round 2: reconcile robustness', () => {
+  it('matches Slack-formatted links and refuses to guess when has_more is set without a cursor', async () => {
+    const f = vi.fn(async (u: string) => {
+      if (u.includes('auth.test')) return Response.json({ ok: true, user_id: 'USELF001' })
+      return Response.json({ ok: true, messages: [{ ts: '2.1', user: 'USELF001', text: '〔眼镜〕看 <https://example.invalid/a|example.invalid/a> 和 <mailto:a@b.invalid|a@b.invalid>' }] })
+    })
+    expect(await new KidDmClient(TOKEN, KID, f, 1000).findOwnPost('〔眼镜〕看 https://example.invalid/a 和 a@b.invalid', null, 1)).toEqual({ ts: '2.1', channel: KID })
+    const partial = vi.fn(async (u: string) =>
+      u.includes('auth.test') ? Response.json({ ok: true, user_id: 'USELF001' }) : Response.json({ ok: true, messages: [], has_more: true }),
+    )
+    await expect(new KidDmClient(TOKEN, KID, partial, 1000).findOwnPost('x', null, 1)).rejects.toMatchObject({ code: 'reconcile_incomplete' })
+  })
+
+  it('classifies Slack errors that may follow a write as uncertain', () => {
+    for (const c of ['internal_error', 'fatal_error', 'request_timeout', 'service_unavailable', 'http_500', 'http_503']) expect(slackErrorIsUncertain(c)).toBe(true)
+    for (const c of ['ratelimited', 'channel_not_found', 'msg_too_long', 'invalid_auth', 'http_400']) expect(slackErrorIsUncertain(c)).toBe(false)
   })
 })

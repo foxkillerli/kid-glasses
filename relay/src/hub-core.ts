@@ -9,7 +9,7 @@ import { HistoryStore, PAGE_MAX, type HistoryItem, type KvStorage } from './hist
 import { MAX_SAY_CHARS, parseClientMessage, type ServerMessage, type WireItem } from './protocol'
 import { MAX_OUTGOING_CHARS, clip, cleanText, fromSlack, isFromGlasses, toSlack } from './sanitize'
 import type { KidMessage } from './slack-events'
-import { ChannelNotAllowedError, SlackApiError, SlackConfigError, type PostResult } from './slack-client'
+import { ChannelNotAllowedError, SlackApiError, SlackConfigError, slackErrorIsUncertain, type PostResult } from './slack-client'
 
 export interface DeviceSocket {
   send(data: string): void
@@ -60,6 +60,8 @@ export const PENDING_AUDIO_CAP = 100
 export const VOICE_PENDING_KEY = 'meta:voice-pending'
 export const VOICE_PENDING_CAP = 20
 export const VOICE_PENDING_TTL_MS = 12 * 60 * 60 * 1000
+export const RECONCILE_SETTLE_MS = 30_000
+const RECONCILE_HISTORY_PAGES = 4
 export const CLOSE_UNAUTHORIZED = 4401
 export const CLOSE_NOT_CONFIGURED = 4503
 
@@ -73,6 +75,15 @@ interface PendingVoice {
   cid: string
   text: string
   at: number
+  session?: string
+  threadTs?: string | null
+}
+
+function fitUtf16(s: string, max: number): string {
+  if (s.length <= max) return s
+  const chars = Array.from(s)
+  while (chars.join('').length > max) chars.pop()
+  return chars.join('')
 }
 
 interface CidEntry {
@@ -266,10 +277,12 @@ export class HubCore {
     return ((await this.deps.storage.get<PendingVoice[]>(VOICE_PENDING_KEY)) ?? []).filter(p => now - p.at < VOICE_PENDING_TTL_MS)
   }
 
-  private async keepPendingVoice(cid: string, raw: string): Promise<void> {
-    const text = clip(cleanText(raw), MAX_SAY_CHARS)
+  private async keepPendingVoice(cid: string, raw: string, target: Session): Promise<void> {
+    const text = fitUtf16(clip(cleanText(raw), MAX_SAY_CHARS), MAX_SAY_CHARS)
     if (!text) return
-    const list = [...(await this.pendingVoice()).filter(p => p.cid !== cid), { cid, text, at: this.deps.now() }].slice(-VOICE_PENDING_CAP)
+    const prior = (await this.pendingVoice()).find(p => p.cid === cid)
+    const entry: PendingVoice = prior ? { ...prior, text } : { cid, text, at: this.deps.now(), session: target.id, threadTs: target.threadTs }
+    const list = [...(await this.pendingVoice()).filter(p => p.cid !== cid), entry].slice(-VOICE_PENDING_CAP)
     await this.deps.storage.put(VOICE_PENDING_KEY, list)
     this.log(`voice pending kept n=${list.length}`)
     this.broadcast({ t: 'turn.pending', cid, text })
@@ -281,6 +294,18 @@ export class HubCore {
     if (!all.some(p => p.cid === cid)) return
     await this.deps.storage.put(VOICE_PENDING_KEY, (await this.pendingVoice()).filter(p => p.cid !== cid))
     this.log('voice pending cleared')
+  }
+
+  private async recentGlassesTs(cid: string): Promise<string[]> {
+    const out: string[] = []
+    let before: number | null = null
+    for (let i = 0; i < RECONCILE_HISTORY_PAGES; i++) {
+      const page = await this.history.page(before, PAGE_MAX)
+      for (const item of page.items) if (item.from === 'glasses' && item.slackTs && item.cid !== cid) out.push(item.slackTs)
+      if (!page.more || !page.items.length) break
+      before = page.items[0].seq
+    }
+    return out
   }
 
   private async putCids(list: CidEntry[]): Promise<void> {
@@ -303,13 +328,15 @@ export class HubCore {
       this.broadcast({ t: 'error', code: 'empty-text', message: 'nothing to send', ...(cid ? { cid } : {}) })
       return null
     }
-    const session = await this.currentSession()
+    const current = await this.currentSession()
+    const pv = cid ? (await this.pendingVoice()).find(p => p.cid === cid) : undefined
+    const session: Session = pv?.session && pv.session !== current.id ? { id: pv.session, threadTs: pv.threadTs ?? null, startedAt: pv.at, lastAt: pv.at } : current
     if (cid && known) {
       const find = this.deps.slack.findOwnPost
       let found: PostResult | null = null
       try {
         if (!find) throw new Error('no reconcile')
-        const taken = new Set(others.map(c => c.slackTs).filter((t): t is string => !!t))
+        const taken = new Set([...others.map(c => c.slackTs).filter((t): t is string => !!t), ...(await this.recentGlassesTs(cid))])
         found = await find.call(this.deps.slack, slackText, known.threadTs ?? null, known.at, taken)
       } catch (err) {
         this.log(`say reconcile failed ${errorName(err)}`)
@@ -318,8 +345,13 @@ export class HubCore {
       }
       if (found) {
         this.log('say reconciled: earlier attempt had reached Slack')
-        const origin: Session = known.session && known.session !== session.id ? { id: known.session, threadTs: known.threadTs ?? null, startedAt: known.at, lastAt: known.at } : session
+        const origin: Session = known.session && known.session !== current.id ? { id: known.session, threadTs: known.threadTs ?? null, startedAt: known.at, lastAt: known.at } : current
         return this.recordPosted(raw, cid, others, origin, known.threadTs ?? null, found, true)
+      }
+      if (this.deps.now() - known.at < RECONCILE_SETTLE_MS) {
+        this.log('say reconcile not settled; retry later')
+        this.broadcast({ t: 'error', code: 'slack-unreachable', message: 'the last attempt may still reach Slack; retry later', cid })
+        return null
       }
     }
     if (cid) await this.putCids([...others, { cid, state: 'sending', at: this.deps.now(), threadTs: session.threadTs, session: session.id }])
@@ -329,11 +361,12 @@ export class HubCore {
     } catch (err) {
       const e = err as Error
       this.log(`slack post failed ${errorName(e)}`)
-      const definite = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError || e instanceof SlackApiError
+      const definite = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError || (e instanceof SlackApiError && !slackErrorIsUncertain(e.code))
       if (cid) await this.putCids(definite ? others : [...others, { cid, state: 'uncertain', at: this.deps.now(), threadTs: session.threadTs, session: session.id }])
       this.broadcast({ t: 'error', code: definite ? e.name : 'slack-unreachable', message: definite ? e.message : 'could not reach Slack', ...(cid ? { cid } : {}) })
       const permanent = e instanceof ChannelNotAllowedError || e instanceof SlackConfigError
-      if (voice && cid && !permanent) await this.keepPendingVoice(cid, raw)
+      if (permanent) await this.dropPendingVoice(cid)
+      else if (cid && (voice || pv)) await this.keepPendingVoice(cid, raw, session)
       return null
     }
     return this.recordPosted(raw, cid, others, session, session.threadTs, posted, false)
