@@ -164,10 +164,10 @@ export class DeepgramUpgradeError extends Error {
   }
 }
 
-export type DeepgramConnector = (url: string, apiKey: string) => Promise<WebSocket>
+export type DeepgramConnector = (url: string, apiKey: string, signal?: AbortSignal) => Promise<WebSocket>
 
-export const connectDeepgram: DeepgramConnector = async (url, apiKey) => {
-  const res = await fetch(url, { headers: { Upgrade: 'websocket', Authorization: `Token ${apiKey}` } })
+export const connectDeepgram: DeepgramConnector = async (url, apiKey, signal) => {
+  const res = await fetch(url, { headers: { Upgrade: 'websocket', Authorization: `Token ${apiKey}` }, signal })
   const ws = res.webSocket
   if (!ws) throw new DeepgramUpgradeError(res.status)
   ws.accept()

@@ -511,7 +511,7 @@ export class HubCore {
       now: this.deps.now,
       limits: this.deps.asrLimits,
       log: m => this.log(m),
-      onPartial: text => this.broadcast({ t: 'asr.partial', text }),
+      onPartial: text => this.broadcast({ t: 'asr.partial', text, ...withCid }),
       onDone: o => {
         if (this.turn === entry) this.turn = null
         if (!o.ok) {
@@ -519,7 +519,7 @@ export class HubCore {
           resolve(null)
           return
         }
-        this.broadcast({ t: 'asr.final', text: o.text })
+        this.broadcast({ t: 'asr.final', text: o.text, ...withCid })
         if (!o.text) this.broadcast({ t: 'error', code: 'asr-empty', message: 'no speech recognised; nothing was sent', ...withCid })
         resolve(o.text || null)
       },

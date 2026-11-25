@@ -65,8 +65,8 @@ export class RelayHub implements DurableObject {
       pairing: this.pairing,
       asr: key
         ? {
-            connect: async (lang, fallback) =>
-              asAsrSocket(await connectDeepgram(buildListenUrl(listenOptionsFor(lang, { model: env.DEEPGRAM_MODEL, language: env.DEEPGRAM_LANGUAGE, hints: env.DEEPGRAM_LANGUAGE_HINTS }, fallback)), key)),
+            connect: async (lang, fallback, signal) =>
+              asAsrSocket(await connectDeepgram(buildListenUrl(listenOptionsFor(lang, { model: env.DEEPGRAM_MODEL, language: env.DEEPGRAM_LANGUAGE, hints: env.DEEPGRAM_LANGUAGE_HINTS }, fallback)), key, signal)),
           }
         : null,
       fastLane: fastLaneFor(env),

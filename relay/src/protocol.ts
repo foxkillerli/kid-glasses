@@ -22,8 +22,8 @@ export type ServerMessage =
   | { t: 'pong' }
   | { t: 'replay.done'; upTo: number }
   | ({ t: 'msg' } & WireItem)
-  | { t: 'asr.partial'; text: string }
-  | { t: 'asr.final'; text: string }
+  | { t: 'asr.partial'; text: string; cid?: string }
+  | { t: 'asr.final'; text: string; cid?: string }
   | { t: 'posted'; seq: number; text: string; cid?: string; dup?: boolean }
   | { t: 'kid-webhook'; seq: number; result: 'ok' | 'skipped' | 'failed'; status: number | null }
   | { t: 'history'; items: WireItem[]; more: boolean }

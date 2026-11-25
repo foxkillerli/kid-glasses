@@ -8,7 +8,7 @@ export interface AsrSocket {
 }
 
 export interface AsrConnector {
-  connect(lang: AsrLang, fallback: boolean): Promise<AsrSocket>
+  connect(lang: AsrLang, fallback: boolean, signal?: AbortSignal): Promise<AsrSocket>
 }
 
 export interface Timers {
@@ -93,6 +93,7 @@ export class AsrTurn {
   private lastSentAt: number
   private closeCode: number | null = null
   private readonly handles = new Map<TimerName, unknown>()
+  private inflight: { abort: AbortController; settle: () => void } | null = null
 
   constructor(private readonly deps: AsrTurnDeps) {
     this.L = { ...ASR_LIMITS, ...deps.limits }
@@ -150,26 +151,42 @@ export class AsrTurn {
   private open(): Promise<void> {
     const gen = ++this.gen
     let settled = false
-    const attempt = this.deps.connector.connect(this.deps.lang, this.fallback)
+    const abort = new AbortController()
+    let release: () => void = () => {}
+    const released = new Promise<void>(r => (release = r))
+    const slot = { abort, settle: () => release() }
+    this.inflight = slot
+    const settle = () => {
+      settled = true
+      if (this.inflight === slot) this.inflight = null
+      release()
+    }
+    let attempt: Promise<AsrSocket>
+    try {
+      attempt = this.deps.connector.connect(this.deps.lang, this.fallback, abort.signal)
+    } catch (err) {
+      attempt = Promise.reject(err)
+    }
     this.arm('connect', this.L.connectTimeoutMs, () => {
       if (settled || gen !== this.gen || this.done) return
-      settled = true
+      settle()
+      abort.abort()
       this.deps.log('asr connect timeout')
       this.lost('connect-timeout', null)
     })
-    return attempt.then(
+    const handled = attempt.then(
       sock => {
         if (settled || gen !== this.gen || this.done) {
           this.safeClose(sock)
           return
         }
-        settled = true
+        settle()
         this.clear('connect')
         this.attach(sock, gen)
       },
       err => {
         if (settled || gen !== this.gen || this.done) return
-        settled = true
+        settle()
         this.clear('connect')
         const status = err instanceof DeepgramUpgradeError ? err.status : null
         this.deps.log(`asr connect failed status=${status ?? 'none'} err=${errorName(err)} fallback=${this.fallback ? 1 : 0}`)
@@ -184,6 +201,7 @@ export class AsrTurn {
         this.lost('connect-failed', status)
       },
     )
+    return Promise.race([handled, released])
   }
 
   private attach(sock: AsrSocket, gen: number): void {
@@ -205,6 +223,11 @@ export class AsrTurn {
       if (gen !== this.gen || this.done) return
       this.onClose(null, 'error')
     })
+    if (!this.canReplay()) {
+      this.deps.log('asr retry impossible buffer-overflow')
+      this.fail(this.reconnects > 0 ? 'asr-interrupted' : 'asr-connect-failed', this.reconnects > 0 ? 'transcription ended early; nothing was sent' : 'could not reach the transcription service')
+      return
+    }
     for (const c of this.unfinalized()) {
       if (this.ws !== sock) return
       this.sendAudio(c)
@@ -262,7 +285,7 @@ export class AsrTurn {
     if (code !== null) this.closeCode = code
     this.ws = null
     this.clear('finalize')
-    if (this.stopRequested && this.finalizeSent && (code === 1000 || this.metadataSeen)) {
+    if (this.stopRequested && this.closeSent && (code === 1000 || this.metadataSeen)) {
       this.complete('close')
       return
     }
@@ -359,6 +382,12 @@ export class AsrTurn {
   private finish(reason: string, len: number): void {
     this.done = true
     for (const name of [...this.handles.keys()]) this.clear(name)
+    const pending = this.inflight
+    this.inflight = null
+    if (pending) {
+      pending.abort.abort()
+      pending.settle()
+    }
     const ws = this.ws
     this.ws = null
     this.gen++

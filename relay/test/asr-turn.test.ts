@@ -11,10 +11,12 @@ function turn(queue: Next[], o: { lang?: AsrLang; limits?: Partial<AsrLimits> } 
   const partials: string[] = []
   const outcomes: AsrOutcome[] = []
   const logs: string[] = []
+  const signals: Array<AbortSignal | undefined> = []
   const t = new AsrTurn({
     connector: {
-      connect: (lang, fallback) => {
+      connect: (lang, fallback, signal) => {
         connects.push({ lang, fallback })
+        signals.push(signal)
         const next = queue.shift() ?? new Error('no more sockets')
         if (next === 'hang') return new Promise(() => {})
         return next instanceof Error ? Promise.reject(next) : Promise.resolve(next)
@@ -28,7 +30,7 @@ function turn(queue: Next[], o: { lang?: AsrLang; limits?: Partial<AsrLimits> } 
     onPartial: p => partials.push(p),
     onDone: r => outcomes.push(r),
   })
-  return { t, timers, connects, partials, outcomes, logs }
+  return { t, timers, connects, partials, outcomes, logs, signals }
 }
 
 const frame = (ms: number, fill = 1) => new Uint8Array(ms * 32).fill(fill)
@@ -303,5 +305,56 @@ describe('AsrTurn (Deepgram streaming turn)', () => {
     expect(timers.pending).toBe(0)
     dg.result('late', true, { fromFinalize: true })
     expect(outcomes).toHaveLength(1)
+  })
+
+  it('review M2-1: audio trimmed from the buffer while waiting to reconnect is detected at replay; nothing is posted with a gap', async () => {
+    const dg1 = new FakeAsr()
+    const dg2 = new FakeAsr()
+    const { t, timers, outcomes, logs } = turn([dg1, dg2], { limits: { retryBufferMs: 300 } })
+    await t.start()
+    for (let i = 0; i < 3; i++) t.push(frame(100))
+    dg1.close(1011)
+    t.push(frame(100))
+    timers.advance(300)
+    await flush()
+    expect(dg2.audio()).toEqual([])
+    expect(outcomes).toEqual([{ ok: false, code: 'asr-interrupted', message: 'transcription ended early; nothing was sent' }])
+    expect(logs).toContain('asr retry impossible buffer-overflow')
+  })
+
+  it('review M2-3: a hung upgrade is aborted on timeout, start() still resolves, and cancel aborts the attempt in flight', async () => {
+    const { t, timers, signals } = turn(['hang', 'hang'])
+    let settled = false
+    void t.start().then(() => (settled = true))
+    timers.advance(5000)
+    await flush()
+    expect(settled).toBe(true)
+    expect(signals[0]?.aborted).toBe(true)
+    timers.advance(300)
+    await flush()
+    expect(signals).toHaveLength(2)
+    expect(signals[1]?.aborted).toBe(false)
+    t.cancel('device')
+    expect(signals[1]?.aborted).toBe(true)
+    expect(timers.pending).toBe(0)
+  })
+
+  it('review M2-4: a normal close after Finalize but before CloseStream is retried instead of posting the interim', async () => {
+    const dg1 = new FakeAsr()
+    const dg2 = new FakeAsr()
+    const { t, timers, outcomes } = turn([dg1, dg2])
+    await t.start()
+    const a = frame(100)
+    t.push(a)
+    dg1.result('差不多', false)
+    t.stop('device')
+    dg1.close(1000)
+    expect(outcomes).toEqual([])
+    timers.advance(300)
+    await flush()
+    expect(dg2.audio()).toEqual([a])
+    expect(dg2.texts()).toEqual([FINALIZE])
+    dg2.result('差不多了', true, { start: 0, duration: 0.1, fromFinalize: true })
+    expect(outcomes).toEqual([{ ok: true, text: '差不多了', reason: 'finalize' }])
   })
 })

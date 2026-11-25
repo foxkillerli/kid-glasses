@@ -106,7 +106,7 @@ describe('say dedupe by cid', () => {
     await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
     asr.result('你好', true)
     core.stopAsr('device')
-    asr.close(1000)
+    asr.result('', true, { fromFinalize: true })
     await core.turnsSettled
     await flush()
     expect(device.of('posted')).toEqual([{ t: 'posted', seq: 1, text: '你好', cid: CID }])
@@ -153,6 +153,17 @@ describe('M2 voice turn options', () => {
     asr2.result('', true, { fromFinalize: true })
     await s2.core.turnsSettled
     expect(s2.posts).toEqual(['〔眼镜〕到了'])
+  })
+
+  it('review M2-5: partial and final transcripts carry the turn cid', async () => {
+    const asr = new FakeAsr()
+    const { core, device } = setup({ asr: { connect: async () => asr } })
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
+    asr.result('你好', false)
+    await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
+    asr.result('你好', true, { fromFinalize: true })
+    expect(device.of('asr.partial')).toEqual([{ t: 'asr.partial', text: '你好', cid: CID }])
+    expect(device.of('asr.final')).toEqual([{ t: 'asr.final', text: '你好', cid: CID }])
   })
 
   it('a refused Deepgram key reaches the device as asr-rejected with the cid', async () => {
@@ -344,7 +355,7 @@ describe('review fixes: uncertain Slack posts, evicted devices, cancel, replay m
     await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.start', cid: CID }))
     asr.result('说了一半', true)
     await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.cancel' }))
-    asr.close(1000)
+    asr.result('', true, { fromFinalize: true })
     await core.turnsSettled
     expect(posts).toEqual([])
     expect(device.of('error')).toEqual([])
@@ -361,7 +372,7 @@ describe('review fixes: uncertain Slack posts, evicted devices, cancel, replay m
     asr.result('完整的一句', true)
     await core.onDeviceMessage(device, JSON.stringify({ t: 'audio.stop' }))
     core.cancelAsr('no-devices')
-    asr.close(1000)
+    asr.result('', true, { fromFinalize: true })
     await core.turnsSettled
     await flush()
     expect(posts).toHaveLength(1)
@@ -452,7 +463,7 @@ describe('review round 2 fixes', () => {
     expect(asr.sent.filter(d => typeof d !== 'string').map(d => Array.from(d as Uint8Array))).toEqual([[1, 2]])
     asr.result('a 的话', true)
     await core.onDeviceMessage(a, JSON.stringify({ t: 'audio.stop' }))
-    asr.close(1000)
+    asr.result('', true, { fromFinalize: true })
     await core.turnsSettled
     await flush()
     expect(posts).toHaveLength(1)
